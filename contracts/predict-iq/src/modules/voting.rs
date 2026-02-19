@@ -1,6 +1,7 @@
-use soroban_sdk::{Env, Address, String, contracttype};
+use soroban_sdk::{Env, Address, Symbol, contracttype};
 use crate::types::{Vote, MarketStatus};
 use crate::modules::markets;
+use crate::errors::ErrorCode;
 
 #[contracttype]
 pub enum DataKey {
@@ -14,22 +15,22 @@ pub fn cast_vote(
     market_id: u64,
     outcome: u32,
     weight: i128,
-) {
+) -> Result<(), ErrorCode> {
     voter.require_auth();
 
-    let market = markets::get_market(e, market_id).expect("Market not found");
+    let market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
     
     if market.status != MarketStatus::Disputed {
-        panic!("Market is not in dispute");
+        return Err(ErrorCode::MarketNotDisputed);
     }
 
     if outcome >= market.options.len() {
-        panic!("Invalid outcome index");
+        return Err(ErrorCode::InvalidOutcome);
     }
 
     let vote_key = DataKey::Vote(market_id, voter.clone());
     if e.storage().persistent().has(&vote_key) {
-        panic!("Already voted");
+        return Err(ErrorCode::AlreadyVoted);
     }
 
     let vote = Vote {
@@ -46,10 +47,13 @@ pub fn cast_vote(
     current_tally += weight;
     e.storage().persistent().set(&tally_key, &current_tally);
 
+    // Event format: (Topic, MarketID, SubjectAddr, Data)
     e.events().publish(
-        (String::from_str(e, "vote_cast"), market_id, voter),
+        (Symbol::new(e, "vote_cast"), market_id, voter),
         outcome,
     );
+    
+    Ok(())
 }
 
 pub fn get_tally(e: &Env, market_id: u64, outcome: u32) -> i128 {

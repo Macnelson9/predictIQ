@@ -1,5 +1,6 @@
 use soroban_sdk::{Env, Address};
 use crate::types::ConfigKey;
+use crate::errors::ErrorCode;
 
 pub fn set_admin(e: &Env, admin: Address) {
     e.storage().persistent().set(&ConfigKey::Admin, &admin);
@@ -9,23 +10,26 @@ pub fn get_admin(e: &Env) -> Option<Address> {
     e.storage().persistent().get(&ConfigKey::Admin)
 }
 
-pub fn require_admin(e: &Env) {
-    let admin: Address = get_admin(e).expect("Admin not set");
+pub fn require_admin(e: &Env) -> Result<(), ErrorCode> {
+    let admin: Address = get_admin(e).ok_or(ErrorCode::AdminNotSet)?;
     admin.require_auth();
+    Ok(())
 }
 
-pub fn set_market_admin(e: &Env, admin: Address) {
-    require_admin(e);
+pub fn set_market_admin(e: &Env, admin: Address) -> Result<(), ErrorCode> {
+    require_admin(e)?;
     e.storage().persistent().set(&ConfigKey::MarketAdmin, &admin);
+    Ok(())
 }
 
 pub fn get_market_admin(e: &Env) -> Option<Address> {
     e.storage().persistent().get(&ConfigKey::MarketAdmin)
 }
 
-pub fn set_fee_admin(e: &Env, admin: Address) {
-    require_admin(e);
+pub fn set_fee_admin(e: &Env, admin: Address) -> Result<(), ErrorCode> {
+    require_admin(e)?;
     e.storage().persistent().set(&ConfigKey::FeeAdmin, &admin);
+    Ok(())
 }
 
 pub fn get_fee_admin(e: &Env) -> Option<Address> {

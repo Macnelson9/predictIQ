@@ -1,5 +1,4 @@
-use soroban_sdk::{Env, String, contracttype};
-use crate::modules::circuit_breaker;
+use soroban_sdk::{Env, Symbol, contracttype};
 use crate::types::CircuitBreakerState;
 
 #[contracttype]
@@ -17,8 +16,9 @@ pub fn track_error(e: &Env) {
         // Automatically open the circuit breaker
         e.storage().persistent().set(&crate::types::ConfigKey::CircuitBreakerState, &CircuitBreakerState::Open);
         
+        // Event format: (Topic, MarketID, SubjectAddr, Data) - no market_id for global monitoring
         e.events().publish(
-            (String::from_str(e, "automatic_circuit_breaker_trigger"),),
+            (Symbol::new(e, "automatic_circuit_breaker_trigger"),),
             count,
         );
     }
