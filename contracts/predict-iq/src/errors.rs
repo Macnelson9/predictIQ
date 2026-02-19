@@ -28,4 +28,6 @@ pub enum ErrorCode {
     BetNotFound = 121,
     AlreadyClaimed = 122,
     NotWinningOutcome = 123,
+    InsufficientVotingWeight = 124,
+    GovernanceTokenNotSet = 125,
 }

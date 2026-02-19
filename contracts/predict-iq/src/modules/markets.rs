@@ -34,6 +34,7 @@ pub fn create_market(
         oracle_config,
         total_staked: 0,
         outcome_stakes: Map::new(e),
+        dispute_snapshot_ledger: None,
     };
 
     e.storage().persistent().set(&DataKey::Market(count), &market);

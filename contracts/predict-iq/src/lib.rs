@@ -5,6 +5,7 @@ mod types;
 mod errors;
 mod modules;
 mod test;
+mod test_snapshot_voting;
 
 use crate::types::{ConfigKey, CircuitBreakerState};
 use crate::modules::admin;
@@ -110,5 +111,15 @@ impl PredictIQ {
         crate::modules::admin::require_admin(&e)?;
         crate::modules::monitoring::reset_monitoring(&e);
         Ok(())
+    }
+
+    pub fn set_governance_token(e: Env, token: Address) -> Result<(), ErrorCode> {
+        crate::modules::admin::require_admin(&e)?;
+        e.storage().instance().set(&ConfigKey::GovernanceToken, &token);
+        Ok(())
+    }
+
+    pub fn unlock_tokens(e: Env, voter: Address, market_id: u64) -> Result<(), ErrorCode> {
+        crate::modules::voting::unlock_tokens(&e, voter, market_id)
     }
 }

@@ -24,6 +24,7 @@ pub struct Market {
     pub oracle_config: OracleConfig,
     pub total_staked: i128,
     pub outcome_stakes: Map<u32, i128>,
+    pub dispute_snapshot_ledger: Option<u32>,
 }
 
 #[contracttype]
@@ -46,6 +47,15 @@ pub struct Vote {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LockedTokens {
+    pub voter: Address,
+    pub market_id: u64,
+    pub amount: i128,
+    pub unlock_time: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OracleConfig {
     pub oracle_address: Address,
     pub feed_id: String,
@@ -60,6 +70,7 @@ pub enum ConfigKey {
     FeeAdmin,
     BaseFee,
     CircuitBreakerState,
+    GovernanceToken,
 }
 
 #[contracttype]

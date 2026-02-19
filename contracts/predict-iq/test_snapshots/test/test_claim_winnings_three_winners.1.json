@@ -903,6 +903,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "dispute_snapshot_ledger"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
