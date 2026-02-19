@@ -1,6 +1,7 @@
-use soroban_sdk::{Env, Address, String, contracttype, token};
+use soroban_sdk::{Env, Address, Symbol, contracttype, token};
 use crate::types::{Bet, MarketStatus};
 use crate::modules::markets;
+use crate::errors::ErrorCode;
 
 #[contracttype]
 pub enum DataKey {
@@ -14,21 +15,21 @@ pub fn place_bet(
     outcome: u32,
     amount: i128,
     token_address: Address,
-) {
+) -> Result<(), ErrorCode> {
     bettor.require_auth();
 
-    let mut market = markets::get_market(e, market_id).expect("Market not found");
+    let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
     
     if market.status != MarketStatus::Active {
-        panic!("Market is not active");
+        return Err(ErrorCode::MarketNotActive);
     }
 
     if e.ledger().timestamp() >= market.deadline {
-        panic!("Market deadline passed");
+        return Err(ErrorCode::DeadlinePassed);
     }
 
     if outcome >= market.options.len() {
-        panic!("Invalid outcome index");
+        return Err(ErrorCode::InvalidOutcome);
     }
 
     // Transfer tokens from bettor to contract
@@ -44,7 +45,7 @@ pub fn place_bet(
     });
 
     if existing_bet.amount > 0 && existing_bet.outcome != outcome {
-        panic!("Cannot change outcome for an existing bet");
+        return Err(ErrorCode::CannotChangeOutcome);
     }
 
     existing_bet.amount += amount;
@@ -53,10 +54,13 @@ pub fn place_bet(
     e.storage().persistent().set(&bet_key, &existing_bet);
     markets::update_market(e, market);
 
+    // Event format: (Topic, MarketID, SubjectAddr, Data)
     e.events().publish(
-        (String::from_str(e, "bet_placed"), market_id, bettor),
+        (Symbol::new(e, "bet_placed"), market_id, bettor),
         amount,
     );
+    
+    Ok(())
 }
 
 pub fn get_bet(e: &Env, market_id: u64, bettor: Address) -> Option<Bet> {

@@ -1,14 +1,15 @@
-use soroban_sdk::{Env, Address, String};
-use crate::types::{MarketStatus, Market};
+use soroban_sdk::{Env, Address, Symbol};
+use crate::types::MarketStatus;
 use crate::modules::markets;
+use crate::errors::ErrorCode;
 
-pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) {
+pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) -> Result<(), ErrorCode> {
     disciplinarian.require_auth();
 
-    let mut market = markets::get_market(e, market_id).expect("Market not found");
+    let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
     
     if market.status != MarketStatus::PendingResolution {
-        panic!("Market cannot be disputed in current state");
+        return Err(ErrorCode::MarketNotPendingResolution);
     }
 
     market.status = MarketStatus::Disputed;
@@ -17,23 +18,29 @@ pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) {
 
     markets::update_market(e, market);
 
+    // Event format: (Topic, MarketID, SubjectAddr, Data)
     e.events().publish(
-        (String::from_str(e, "market_disputed"), market_id),
-        disciplinarian,
+        (Symbol::new(e, "market_disputed"), market_id, disciplinarian),
+        (),
     );
+    
+    Ok(())
 }
 
-pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) {
+pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(), ErrorCode> {
     // This would ideally be called by an admin or triggered by oracle/consensus
-    let mut market = markets::get_market(e, market_id).expect("Market not found");
+    let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
     
     market.status = MarketStatus::Resolved;
     market.winning_outcome = Some(winning_outcome);
 
     markets::update_market(e, market);
 
+    // Event format: (Topic, MarketID, SubjectAddr, Data)
     e.events().publish(
-        (String::from_str(e, "market_resolved"), market_id),
+        (Symbol::new(e, "market_resolved"), market_id),
         winning_outcome,
     );
+    
+    Ok(())
 }

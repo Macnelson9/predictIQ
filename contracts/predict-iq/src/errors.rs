@@ -19,4 +19,10 @@ pub enum ErrorCode {
     VotingEnded = 112,
     AlreadyVoted = 113,
     FeeTooHigh = 114,
+    MarketNotActive = 115,
+    DeadlinePassed = 116,
+    CannotChangeOutcome = 117,
+    MarketNotDisputed = 118,
+    MarketNotPendingResolution = 119,
+    AdminNotSet = 120,
 }
