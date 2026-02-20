@@ -27,6 +27,8 @@ fn test_market_lifecycle() {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "btc_price"),
         min_responses: 1,
+        max_staleness_seconds: 300, // 5 minutes
+        max_confidence_bps: 200, // 2%
     };
 
     let token_admin = Address::generate(&e);
