@@ -8,3 +8,6 @@ pub mod fees;
 pub mod oracles;
 pub mod circuit_breaker;
 pub mod monitoring;
+
+#[cfg(test)]
+mod oracles_test;

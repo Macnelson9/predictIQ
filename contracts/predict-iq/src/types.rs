@@ -62,6 +62,8 @@ pub struct OracleConfig {
     pub oracle_address: Address,
     pub feed_id: String,
     pub min_responses: u32,
+    pub max_staleness_seconds: u64,
+    pub max_confidence_bps: u64, // basis points (e.g., 200 = 2%)
 }
 
 #[contracttype]
