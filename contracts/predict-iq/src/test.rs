@@ -81,6 +81,8 @@ fn test_claim_winnings_three_winners() {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test"),
         min_responses: 1,
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
     };
 
     let market_id = client.create_market(&creator, &description, &options, &100, &200, &oracle_config, &token_address);
@@ -148,6 +150,8 @@ fn test_claim_winnings_double_claim() {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test"),
         min_responses: 1,
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
     };
 
     let market_id = client.create_market(&creator, &description, &options, &100, &200, &oracle_config, &token_address);

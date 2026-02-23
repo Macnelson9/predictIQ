@@ -1,6 +1,6 @@
-use soroban_sdk::{Env, Address, Symbol, contracttype, token};
+use soroban_sdk::{Env, Address, Symbol, contracttype};
 use crate::types::{Bet, MarketStatus};
-use crate::modules::markets;
+use crate::modules::{markets, sac};
 use crate::errors::ErrorCode;
 
 #[contracttype]
@@ -39,9 +39,8 @@ pub fn place_bet(
         return Err(ErrorCode::InvalidBetAmount);
     }
 
-    // Transfer tokens from bettor to contract
-    let client = token::Client::new(e, &token_address);
-    client.transfer(&bettor, &e.current_contract_address(), &amount);
+    // Transfer tokens from bettor to contract using SAC-safe transfer
+    sac::safe_transfer(e, &token_address, &bettor, &e.current_contract_address(), &amount)?;
 
     let bet_key = DataKey::Bet(market_id, bettor.clone());
     let mut existing_bet: Bet = e.storage().persistent().get(&bet_key).unwrap_or(Bet {
@@ -116,8 +115,8 @@ pub fn claim_winnings(
 
     e.storage().persistent().remove(&bet_key);
 
-    let client = token::Client::new(e, &market.token_address);
-    client.transfer(&e.current_contract_address(), &bettor, &payout);
+    // Use SAC-safe transfer for payout
+    sac::safe_transfer(e, &market.token_address, &e.current_contract_address(), &bettor, &payout)?;
 
     e.events().publish(
         (Symbol::new(e, "winnings_claimed"), market_id, bettor),

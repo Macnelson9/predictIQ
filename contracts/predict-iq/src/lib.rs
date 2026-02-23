@@ -10,6 +10,7 @@ mod test_resolution_state_machine;
 mod test_multi_token;
 mod test_cancellation;
 mod test_referral;
+mod test_classic_assets;
 
 use crate::types::{ConfigKey, CircuitBreakerState};
 use crate::modules::admin;
@@ -153,5 +154,16 @@ impl PredictIQ {
 
     pub fn withdraw_refund(e: Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
         crate::modules::cancellation::withdraw_refund(&e, bettor, market_id)
+    }
+
+    /// Check if market's prize pool was clawed back and auto-cancel if detected
+    pub fn check_clawback(e: Env, market_id: u64) -> Result<(), ErrorCode> {
+        let market = crate::modules::markets::get_market(&e, market_id)
+            .ok_or(ErrorCode::MarketNotFound)?;
+        
+        // Detect if balance was clawed back
+        crate::modules::sac::detect_clawback(&e, &market.token_address, market.total_staked)?;
+        
+        Ok(())
     }
 }
