@@ -5,6 +5,15 @@ This service adds a multi-layer cache strategy for API responses, database query
 ## Features
 
 - Redis cache-aside implementation
+- Stellar Soroban JSON-RPC integration with retry/backoff
+- Network switching support (testnet/mainnet/custom)
+- Contract query methods:
+  - Market data
+  - Platform statistics
+  - User bets
+  - Oracle results
+- Event listener/sync worker with transaction monitoring
+- Reorg-aware synchronization using confirmation lag and cursor tracking
 - Cache layers:
   - API response cache (`api:v1:*`)
   - DB query cache (`dbq:v1:*`)
@@ -24,7 +33,15 @@ This service adds a multi-layer cache strategy for API responses, database query
 - `API_BIND_ADDR` (default: `0.0.0.0:8080`)
 - `REDIS_URL` (default: `redis://127.0.0.1:6379`)
 - `DATABASE_URL` (default: `postgres://postgres:postgres@127.0.0.1/predictiq`)
-- `BLOCKCHAIN_RPC_URL` (default: `https://soroban-testnet.stellar.org:443`)
+- `BLOCKCHAIN_NETWORK` (`testnet` | `mainnet` | `custom`, default: `testnet`)
+- `BLOCKCHAIN_RPC_URL` (optional override for network endpoint)
+- `PREDICTIQ_CONTRACT_ID` (contract identifier used for reads)
+- `RPC_RETRY_ATTEMPTS` (default: `3`)
+- `RPC_RETRY_BASE_DELAY_MS` (default: `200`)
+- `EVENT_POLL_INTERVAL_SECS` (default: `5`)
+- `TX_POLL_INTERVAL_SECS` (default: `4`)
+- `CONFIRMATION_LEDGER_LAG` (default: `3`)
+- `SYNC_MARKET_IDS` (comma-separated market IDs for background sync)
 - `FEATURED_LIMIT` (default: `10`)
 - `CONTENT_DEFAULT_PAGE_SIZE` (default: `20`)
 
@@ -48,7 +65,16 @@ Examples:
 cargo run -p predictiq-api
 ```
 
+## Blockchain Endpoints
+
+- `GET /api/blockchain/health`
+- `GET /api/blockchain/stats`
+- `GET /api/blockchain/markets/:market_id`
+- `GET /api/blockchain/users/:user/bets?page=1&page_size=20`
+- `GET /api/blockchain/oracle/:market_id`
+- `GET /api/blockchain/tx/:tx_hash` (also registers hash for ongoing monitor polling)
+
 ## Notes
 
-- Replace the placeholder blockchain HTTP call in `src/blockchain.rs` with your production Soroban RPC call shape.
+- `getContractData` key shapes are currently convention-based (`market:<id>`, `platform:stats`, etc.). Align them to your deployed contract storage schema.
 - `del_by_pattern` currently uses `KEYS` for clarity. For large production datasets, switch to a `SCAN` cursor strategy.

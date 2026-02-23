@@ -51,6 +51,12 @@ pub async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PagingQuery {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
 pub async fn statistics(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     let start = Instant::now();
     let cache_key = keys::api_statistics();
@@ -208,12 +214,88 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     Ok((StatusCode::OK, body))
 }
 
+pub async fn blockchain_health(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let data = state
+        .blockchain
+        .health_check_cached()
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
+pub async fn blockchain_market_data(
+    State(state): State<Arc<AppState>>,
+    Path(market_id): Path<i64>,
+) -> Result<impl IntoResponse, ApiError> {
+    let data = state
+        .blockchain
+        .market_data_cached(market_id)
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
+pub async fn blockchain_platform_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let data = state
+        .blockchain
+        .platform_statistics_cached()
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
+pub async fn blockchain_user_bets(
+    State(state): State<Arc<AppState>>,
+    Path(user): Path<String>,
+    Query(query): Query<PagingQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let page = query.page.unwrap_or(1).max(1);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+    let data = state
+        .blockchain
+        .user_bets_cached(&user, page, page_size)
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
+pub async fn blockchain_oracle_result(
+    State(state): State<Arc<AppState>>,
+    Path(market_id): Path<i64>,
+) -> Result<impl IntoResponse, ApiError> {
+    let data = state
+        .blockchain
+        .oracle_result_cached(market_id)
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
+pub async fn blockchain_tx_status(
+    State(state): State<Arc<AppState>>,
+    Path(tx_hash): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.blockchain.watch_transaction(&tx_hash).await;
+    let data = state
+        .blockchain
+        .transaction_status_cached(&tx_hash)
+        .await
+        .map_err(into_api_error)?;
+    Ok((StatusCode::OK, Json(data)))
+}
+
 pub async fn warm_critical_caches(state: Arc<AppState>) -> anyhow::Result<()> {
     let _ = state.db.statistics_cached().await?;
     let _ = state
         .db
         .featured_markets_cached(state.config.featured_limit)
         .await?;
+    let _ = state.blockchain.health_check_cached().await?;
+    let _ = state.blockchain.platform_statistics_cached().await?;
     let _ = statistics(State(state.clone())).await;
     let _ = featured_markets(State(state)).await;
     Ok(())

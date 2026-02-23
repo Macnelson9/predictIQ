@@ -113,4 +113,38 @@ pub mod keys {
     pub fn chain_market(market_id: i64) -> String {
         format!("{CHAIN_PREFIX}:market:{market_id}")
     }
+
+    pub fn chain_platform_stats(network: &str) -> String {
+        format!("{CHAIN_PREFIX}:platform_stats:{network}")
+    }
+
+    pub fn chain_user_bets(network: &str, user: &str, page: i64, page_size: i64) -> String {
+        format!(
+            "{CHAIN_PREFIX}:user_bets:{network}:{}:page:{page}:size:{page_size}",
+            user.to_lowercase()
+        )
+    }
+
+    pub fn chain_oracle_result(network: &str, market_id: i64) -> String {
+        format!("{CHAIN_PREFIX}:oracle:{network}:market:{market_id}")
+    }
+
+    pub fn chain_tx_status(network: &str, tx_hash: &str) -> String {
+        format!(
+            "{CHAIN_PREFIX}:tx_status:{network}:{}",
+            tx_hash.to_lowercase()
+        )
+    }
+
+    pub fn chain_health(network: &str) -> String {
+        format!("{CHAIN_PREFIX}:health:{network}")
+    }
+
+    pub fn chain_last_seen_ledger(network: &str) -> String {
+        format!("{CHAIN_PREFIX}:last_seen_ledger:{network}")
+    }
+
+    pub fn chain_sync_cursor(network: &str) -> String {
+        format!("{CHAIN_PREFIX}:sync_cursor:{network}")
+    }
 }
