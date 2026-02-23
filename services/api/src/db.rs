@@ -203,8 +203,4 @@ impl Database {
 
         Ok(value)
     }
-
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
-    }
 }

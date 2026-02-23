@@ -42,11 +42,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
     let db = Database::new(&config.database_url, cache.clone(), metrics.clone()).await?;
-    let blockchain = BlockchainClient::new(
-        config.blockchain_rpc_url.clone(),
-        cache.clone(),
-        metrics.clone(),
-    );
+    let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
 
     let bind_addr = config.bind_addr;
 
@@ -58,6 +54,8 @@ async fn main() -> anyhow::Result<()> {
         metrics,
     });
 
+    Arc::new(state.blockchain.clone()).start_background_tasks();
+
     if let Err(err) = handlers::warm_critical_caches(state.clone()).await {
         tracing::warn!("cache warming skipped: {err}");
     }
@@ -65,6 +63,27 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
+        .route("/api/blockchain/health", get(handlers::blockchain_health))
+        .route(
+            "/api/blockchain/markets/:market_id",
+            get(handlers::blockchain_market_data),
+        )
+        .route(
+            "/api/blockchain/stats",
+            get(handlers::blockchain_platform_stats),
+        )
+        .route(
+            "/api/blockchain/users/:user/bets",
+            get(handlers::blockchain_user_bets),
+        )
+        .route(
+            "/api/blockchain/oracle/:market_id",
+            get(handlers::blockchain_oracle_result),
+        )
+        .route(
+            "/api/blockchain/tx/:tx_hash",
+            get(handlers::blockchain_tx_status),
+        )
         .route("/api/statistics", get(handlers::statistics))
         .route("/api/markets/featured", get(handlers::featured_markets))
         .route("/api/content", get(handlers::content))
