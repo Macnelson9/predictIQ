@@ -81,8 +81,27 @@ impl PredictIQ {
         )
     }
 
+<<<<<<< features/issue-13-Database-Schema-and-Migrations
     pub fn claim_winnings(e: Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
         crate::modules::bets::claim_winnings(&e, bettor, market_id)
+=======
+    pub fn claim_winnings(
+        e: Env,
+        bettor: Address,
+        market_id: u64,
+        token_address: Address,
+    ) -> Result<i128, ErrorCode> {
+        crate::modules::bets::claim_winnings(&e, bettor, market_id, token_address)
+    }
+
+    pub fn withdraw_refund(
+        e: Env,
+        bettor: Address,
+        market_id: u64,
+        token_address: Address,
+    ) -> Result<i128, ErrorCode> {
+        crate::modules::bets::withdraw_refund(&e, bettor, market_id, token_address)
+>>>>>>> main
     }
 
     pub fn get_market(e: Env, id: u64) -> Option<crate::types::Market> {
@@ -164,29 +183,6 @@ impl PredictIQ {
         crate::modules::circuit_breaker::unpause(&e)
     }
 
-    pub fn claim_winnings(
-        e: Env,
-        bettor: Address,
-        market_id: u64,
-        token_address: Address,
-    ) -> Result<i128, ErrorCode> {
-        crate::modules::bets::claim_winnings(&e, bettor, market_id, token_address)
-    }
-
-    pub fn withdraw_refund(
-        e: Env,
-        bettor: Address,
-        market_id: u64,
-        token_address: Address,
-    ) -> Result<i128, ErrorCode> {
-        crate::modules::bets::withdraw_refund(&e, bettor, market_id, token_address)
-    }
-
-    pub fn resolve_market(e: Env, market_id: u64, winning_outcome: u32) -> Result<(), ErrorCode> {
-        crate::modules::admin::require_admin(&e)?;
-        crate::modules::disputes::resolve_market(&e, market_id, winning_outcome)
-    }
-
     pub fn get_resolution_metrics(
         e: Env,
         market_id: u64,
@@ -266,5 +262,10 @@ impl PredictIQ {
 
     pub fn is_timelock_satisfied(e: Env) -> Result<bool, ErrorCode> {
         crate::modules::governance::is_timelock_satisfied(&e)
+    }
+
+    /// Prune (archive) a resolved market after 30 days grace period
+    pub fn prune_market(e: Env, market_id: u64) -> Result<(), ErrorCode> {
+        crate::modules::markets::prune_market(&e, market_id)
     }
 }
