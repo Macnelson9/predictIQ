@@ -2,6 +2,7 @@ mod blockchain;
 mod cache;
 mod config;
 mod db;
+mod email;
 mod handlers;
 mod metrics;
 mod newsletter;
@@ -20,6 +21,7 @@ use blockchain::BlockchainClient;
 use cache::RedisCache;
 use config::Config;
 use db::Database;
+use email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler};
 use metrics::Metrics;
 use newsletter::IpRateLimiter;
 use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
@@ -39,9 +41,9 @@ pub struct AppState {
     pub(crate) blockchain: BlockchainClient,
     pub(crate) metrics: Metrics,
     pub(crate) newsletter_rate_limiter: IpRateLimiter,
-    pub(crate) rate_limiter: Arc<RateLimiter>,
-    pub(crate) api_key_auth: Arc<ApiKeyAuth>,
-    pub(crate) ip_whitelist: Arc<IpWhitelist>,
+    pub(crate) email_service: EmailService,
+    pub(crate) email_queue: EmailQueue,
+    pub(crate) webhook_handler: WebhookHandler,
 }
 
 #[tokio::main]
@@ -58,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
     let cache = RedisCache::new(&config.redis_url).await?;
     let db = Database::new(&config.database_url, cache.clone(), metrics.clone()).await?;
     let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
+    
+    // Initialize email service components
+    let email_service = EmailService::new(config.clone())?;
+    let email_queue = EmailQueue::new(cache.clone(), db.clone());
+    let webhook_handler = WebhookHandler::new(db.clone());
 
     let bind_addr = config.bind_addr;
 
@@ -83,12 +90,19 @@ async fn main() -> anyhow::Result<()> {
         blockchain,
         metrics,
         newsletter_rate_limiter: IpRateLimiter::default(),
-        rate_limiter: rate_limiter.clone(),
-        api_key_auth: api_key_auth.clone(),
-        ip_whitelist: ip_whitelist.clone(),
+        email_service: email_service.clone(),
+        email_queue: email_queue.clone(),
+        webhook_handler: webhook_handler.clone(),
     });
 
     Arc::new(state.blockchain.clone()).start_background_tasks();
+    
+    // Start email queue worker in background
+    let queue_worker = email_queue.clone();
+    let service_worker = email_service.clone();
+    tokio::spawn(async move {
+        queue_worker.start_worker(service_worker).await;
+    });
 
     if let Err(err) = handlers::warm_critical_caches(state.clone()).await {
         tracing::warn!("cache warming skipped: {err}");
@@ -166,29 +180,27 @@ async fn main() -> anyhow::Result<()> {
             "/api/markets/:market_id/resolve",
             post(handlers::resolve_market),
         )
-        .layer(middleware::from_fn_with_state(
-            rate_limiter.clone(),
-            rate_limit::admin_rate_limit_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            api_key_auth,
-            security::api_key_middleware,
-        ))
-        .layer(middleware::from_fn_with_state(
-            ip_whitelist,
-            security::ip_whitelist_middleware,
-        ));
-
-    let app = Router::new()
-        .merge(public_routes)
-        .merge(newsletter_routes)
-        .merge(admin_routes)
-        .layer(middleware::from_fn(security::security_headers_middleware))
-        .layer(middleware::from_fn(validation::request_validation_middleware))
-        .layer(middleware::from_fn(validation::content_type_validation_middleware))
-        .layer(middleware::from_fn(validation::request_size_validation_middleware))
-        .layer(CompressionLayer::new())
-        .layer(cors)
+        // Email service endpoints
+        .route(
+            "/api/v1/email/preview/:template_name",
+            get(handlers::email_preview),
+        )
+        .route(
+            "/api/v1/email/test",
+            post(handlers::email_send_test),
+        )
+        .route(
+            "/api/v1/email/analytics",
+            get(handlers::email_analytics),
+        )
+        .route(
+            "/api/v1/email/queue/stats",
+            get(handlers::email_queue_stats),
+        )
+        .route(
+            "/webhooks/sendgrid",
+            post(handlers::sendgrid_webhook),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
