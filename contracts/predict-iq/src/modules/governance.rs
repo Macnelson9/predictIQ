@@ -174,11 +174,31 @@ fn is_majority_met(e: &Env, pending_upgrade: &PendingUpgrade) -> bool {
         return false;
     }
 
-    let total_guardians = guardians.len() as u32;
-    let votes_for = pending_upgrade.votes_for.len() as u32;
+    // Sum total voting power across all guardians
+    let mut total_power: u32 = 0;
+    for i in 0..guardians.len() {
+        total_power += guardians.get(i).unwrap().voting_power;
+    }
 
-    // Calculate percentage: (votes_for / total_guardians) * 100
-    let percentage = (votes_for * 100) / total_guardians;
+    if total_power == 0 {
+        return false;
+    }
+
+    // Sum voting power of guardians who voted for
+    let mut power_for: u32 = 0;
+    for i in 0..pending_upgrade.votes_for.len() {
+        let voter = pending_upgrade.votes_for.get(i).unwrap();
+        for j in 0..guardians.len() {
+            let g = guardians.get(j).unwrap();
+            if g.address == voter {
+                power_for += g.voting_power;
+                break;
+            }
+        }
+    }
+
+    // Calculate percentage: (power_for / total_power) * 100
+    let percentage = (power_for * 100) / total_power;
     percentage >= MAJORITY_THRESHOLD_PERCENT
 }
 

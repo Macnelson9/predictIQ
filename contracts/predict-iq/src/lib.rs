@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 mod errors;
@@ -6,7 +6,8 @@ mod modules;
 mod test;
 pub mod types;
 
-use crate::errors::ErrorCode;
+pub use errors::ErrorCode;
+
 use crate::modules::admin;
 use crate::types::{CircuitBreakerState, ConfigKey};
 
@@ -97,7 +98,7 @@ impl PredictIQ {
         outcome: u32,
         token_address: Address,
     ) -> Result<i128, ErrorCode> {
-        crate::modules::bets::withdraw_refund(&e, bettor, market_id, outcome, token_address)
+        crate::modules::bets::withdraw_refund(&e, bettor, market_id, token_address)
     }
 
     pub fn get_market(e: Env, id: u64) -> Option<crate::types::Market> {

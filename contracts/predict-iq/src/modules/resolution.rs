@@ -64,7 +64,7 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
         },
         MarketStatus::Disputed => {
             // Check if 72h voting period has passed
-            let dispute_ts = market.dispute_timestamp.ok_or(ErrorCode::MarketNotDisputed)?;
+            let dispute_ts = market.pending_resolution_timestamp.ok_or(ErrorCode::MarketNotDisputed)?;
             if e.ledger().timestamp() < dispute_ts + VOTING_PERIOD_SECONDS {
                 return Err(ErrorCode::VotingNotStarted);
             }
