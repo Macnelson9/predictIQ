@@ -191,3 +191,18 @@ pub fn emit_fee_collected(e: &Env, _market_id: u64, contract_address: Address, a
     e.events()
         .publish((symbol_short!("fee_colct"), 0u64, contract_address), amount);
 }
+
+/// Emit MonitoringStateReset event
+/// Topics: [mon_reset, 0 (no market), resetter]
+/// Data: (previous_error_count, previous_last_observation)
+pub fn emit_monitoring_state_reset(
+    e: &Env,
+    resetter: Address,
+    previous_error_count: u32,
+    previous_last_observation: u64,
+) {
+    e.events().publish(
+        (symbol_short!("mon_reset"), 0u64, resetter),
+        (previous_error_count, previous_last_observation),
+    );
+}
