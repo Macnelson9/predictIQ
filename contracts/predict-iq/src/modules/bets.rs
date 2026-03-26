@@ -21,7 +21,6 @@ pub fn place_bet(
 ) -> Result<(), ErrorCode> {
     bettor.require_auth();
 
-    // Check if contract is paused - high-risk operation
     crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
 
     if amount <= 0 {
@@ -41,23 +40,8 @@ pub fn place_bet(
         return Err(ErrorCode::MarketClosed);
     }
 
-    // Validate parent market conditions for conditional markets
     if market.parent_id > 0 {
-        let parent_market =
-            markets::get_market(e, market.parent_id).ok_or(ErrorCode::MarketNotFound)?;
-
-        // Parent must be resolved
-        if parent_market.status != MarketStatus::Resolved {
-            return Err(ErrorCode::ParentMarketNotResolved);
-        }
-
-        // Parent must have resolved to the required outcome
-        let parent_winning_outcome = parent_market
-            .winning_outcome
-            .ok_or(ErrorCode::ParentMarketNotResolved)?;
-        if parent_winning_outcome != market.parent_outcome_idx {
-            return Err(ErrorCode::ParentMarketInvalidOutcome);
-        }
+        markets::validate_parent_market(e, market.parent_id, market.parent_outcome_idx)?;
     }
 
     if e.ledger().timestamp() >= market.deadline {
@@ -76,12 +60,10 @@ pub fn place_bet(
         return Err(ErrorCode::InvalidOutcome);
     }
 
-    // Validate token_address matches market's configured asset
     if token_address != market.token_address {
         return Err(ErrorCode::InvalidBetAmount);
     }
 
-    // Transfer tokens from bettor to contract using SAC-safe transfer
     sac::safe_transfer(
         e,
         &token_address,
@@ -105,10 +87,15 @@ pub fn place_bet(
     let outcome_stake = market.outcome_stakes.get(outcome).unwrap_or(0);
     market.outcome_stakes.set(outcome, outcome_stake + amount);
 
+    // Issue #24: Maintain actual winner count per outcome
+    let is_new_bettor = existing_bet.amount == amount; // first bet on this outcome
+    if is_new_bettor {
+        let current_count = market.winner_counts.get(outcome).unwrap_or(0);
+        market.winner_counts.set(outcome, current_count + 1);
+    }
+
     e.storage().persistent().set(&bet_key, &existing_bet);
     markets::update_market(e, market);
-
-    // Bump TTL for market data to prevent state expiration
     markets::bump_market_ttl(e, market_id);
 
     // Track referral reward
@@ -132,12 +119,7 @@ pub fn get_bet(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option
         .get(&DataKey::Bet(market_id, bettor, outcome))
 }
 
-pub fn claim_winnings(
-    e: &Env,
-    bettor: Address,
-    market_id: u64,
-    token_address: Address,
-) -> Result<i128, ErrorCode> {
+pub fn claim_winnings(e: &Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
     bettor.require_auth();
 
     let market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
@@ -174,6 +156,8 @@ pub fn claim_winnings(
         .unwrap_or(bet.amount); // fallback: return stake if no pool data
     let winnings = (bet.amount * market.total_staked) / winning_outcome_stake;
 
+    // Transfer winnings to bettor using the market's trusted token address
+    let client = token::Client::new(e, &market.token_address);
     // Transfer winnings to bettor
     let client = token::Client::new(e, &token_address);
     e.current_contract_address().require_auth();
@@ -197,6 +181,7 @@ pub fn claim_winnings(
     Ok(winnings)
 }
 
+pub fn withdraw_refund(e: &Env, bettor: Address, market_id: u64) -> Result<i128, ErrorCode> {
 pub fn withdraw_refund(
     e: &Env,
     bettor: Address,
@@ -222,6 +207,8 @@ pub fn withdraw_refund(
     let refund_amount = bet.amount;
     let bet_outcome = bet.outcome;
 
+    // Transfer refund to bettor using the market's trusted token address
+    let client = token::Client::new(e, &market.token_address);
     // Transfer refund to bettor
     let client = token::Client::new(e, &token_address);
     e.current_contract_address().require_auth();
@@ -260,7 +247,7 @@ pub fn get_minimum_bet_amount(e: &Env) -> i128 {
 }
 
 pub fn set_minimum_bet_amount(e: &Env, amount: i128) -> Result<(), ErrorCode> {
-    crate::modules::admin::require_admin(e)?;
+    crate::modules::admin::require_market_admin(e)?;
     e.storage()
         .persistent()
         .set(&crate::types::ConfigKey::MinimumBetAmount, &amount);

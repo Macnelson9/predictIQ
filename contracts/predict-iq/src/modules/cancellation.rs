@@ -1,7 +1,7 @@
 use crate::errors::ErrorCode;
-use crate::modules::{admin, events, markets, sac};
+use crate::modules::{admin, markets, sac};
 use crate::types::MarketStatus;
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, Symbol};
 
 const FAILED_MARKET_THRESHOLD_BPS: i128 = 7500; // 75% vote required to cancel
 
@@ -18,8 +18,8 @@ pub fn cancel_market_admin(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     market.status = MarketStatus::Cancelled;
     markets::update_market(e, market);
 
-    let admin_addr = e.current_contract_address();
-    events::emit_market_cancelled(e, market_id, admin_addr);
+    e.events()
+        .publish((Symbol::new(e, "market_cancelled"), market_id), ());
 
     Ok(())
 }
@@ -52,8 +52,8 @@ pub fn cancel_market_vote(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     market.status = MarketStatus::Cancelled;
     markets::update_market(e, market);
 
-    let resolver = e.current_contract_address();
-    events::emit_market_cancelled_vote(e, market_id, resolver);
+    e.events()
+        .publish((Symbol::new(e, "market_cancelled_vote"), market_id), ());
 
     Ok(())
 }
@@ -75,6 +75,11 @@ pub fn withdraw_refund(
         return Err(ErrorCode::MarketNotActive);
     }
 
+    let bet_key = crate::modules::bets::DataKey::Bet(market_id, bettor.clone());
+    let bet: crate::types::Bet = e
+        .storage()
+        .persistent()
+    
     let bet_key = crate::modules::bets::DataKey::Bet(market_id, bettor.clone(), outcome);
     let bet: crate::types::Bet = e
         .storage()
@@ -87,6 +92,19 @@ pub fn withdraw_refund(
     e.storage().persistent().remove(&bet_key);
 
     // Use SAC-safe transfer for refund
+    sac::safe_transfer(
+        e,
+        &market.token_address,
+        &e.current_contract_address(),
+        &bettor,
+        &refund_amount,
+    )?;
+
+    e.events().publish(
+        (Symbol::new(e, "refund_withdrawn"), market_id, bettor),
+        refund_amount,
+    );
+
     e.current_contract_address().require_auth();
     sac::safe_transfer(
         e,

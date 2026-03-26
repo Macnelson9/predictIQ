@@ -17,6 +17,7 @@ pub fn get_admin(e: &Env) -> Option<Address> {
     e.storage().persistent().get(&ConfigKey::Admin)
 }
 
+/// Require master Admin role - reserved for structural changes (upgrades, role assignments)
 pub fn require_admin(e: &Env) -> Result<(), ErrorCode> {
     let admin: Address = get_admin(e).ok_or(ErrorCode::NotAuthorized)?;
     admin.require_auth();
@@ -36,6 +37,13 @@ pub fn get_market_admin(e: &Env) -> Option<Address> {
     e.storage().persistent().get(&ConfigKey::MarketAdmin)
 }
 
+/// Require MarketAdmin role - for market operational tasks
+pub fn require_market_admin(e: &Env) -> Result<(), ErrorCode> {
+    let market_admin: Address = get_market_admin(e).ok_or(ErrorCode::NotAuthorized)?;
+    market_admin.require_auth();
+    Ok(())
+}
+
 pub fn set_fee_admin(e: &Env, admin: Address) -> Result<(), ErrorCode> {
     require_admin(e)?;
     e.storage().persistent().set(&ConfigKey::FeeAdmin, &admin);
@@ -45,6 +53,13 @@ pub fn set_fee_admin(e: &Env, admin: Address) -> Result<(), ErrorCode> {
 
 pub fn get_fee_admin(e: &Env) -> Option<Address> {
     e.storage().persistent().get(&ConfigKey::FeeAdmin)
+}
+
+/// Require FeeAdmin role - for fee operational tasks
+pub fn require_fee_admin(e: &Env) -> Result<(), ErrorCode> {
+    let fee_admin: Address = get_fee_admin(e).ok_or(ErrorCode::NotAuthorized)?;
+    fee_admin.require_auth();
+    Ok(())
 }
 
 pub fn set_guardian(e: &Env, guardian: Address) -> Result<(), ErrorCode> {
