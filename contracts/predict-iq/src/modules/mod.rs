@@ -8,4 +8,6 @@ pub mod governance;
 pub mod markets;
 pub mod monitoring;
 pub mod oracles;
+#[cfg(test)]
+pub mod oracles_test;
 pub mod voting;

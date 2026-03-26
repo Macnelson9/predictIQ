@@ -32,7 +32,9 @@ fn create_test_market(
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     client.create_market(
@@ -66,7 +68,9 @@ fn make_stored_market(e: &Env, id: u64) -> types::Market {
         oracle_config: types::OracleConfig {
             oracle_address: Address::generate(e),
             feed_id: String::from_str(e, "seeded_feed"),
-            min_responses: Some(1),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
         },
         total_staked: 0,
         payout_mode: types::PayoutMode::Pull,
@@ -103,7 +107,9 @@ fn test_market_creation_fails_without_deposit() {
         &types::OracleConfig {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "test"),
-            min_responses: Some(1),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
         },
         &types::MarketTier::Basic,
         &native_token,
@@ -192,7 +198,9 @@ fn test_market_id_overflow_returns_error() {
         &types::OracleConfig {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "overflow_feed"),
-            min_responses: Some(1),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
         },
         &types::MarketTier::Basic,
         &native_token,
@@ -232,7 +240,9 @@ fn test_market_id_collision_returns_error() {
         &types::OracleConfig {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "collision_feed"),
-            min_responses: Some(1),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
         },
         &types::MarketTier::Basic,
         &native_token,
@@ -920,7 +930,9 @@ fn test_create_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let result = client.try_create_market(
@@ -969,7 +981,9 @@ fn test_create_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let result = client.try_create_market(
@@ -1018,7 +1032,9 @@ fn test_create_conditional_market_success() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let child_id = client.create_market(
@@ -1076,7 +1092,9 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let child_id = client.create_market(
@@ -1134,7 +1152,9 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let child_id = client.create_market(
@@ -1213,7 +1233,9 @@ fn test_multi_level_conditional_markets() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let level2_id = client.create_market(
@@ -1280,7 +1302,9 @@ fn test_create_conditional_market_invalid_parent_outcome_idx() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
     };
 
     let result = client.try_create_market(

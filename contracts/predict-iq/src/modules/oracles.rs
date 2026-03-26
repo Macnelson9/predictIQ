@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::types::OracleConfig;
-use soroban_sdk::{contracttype, Env};
+use soroban_sdk::{contracttype, Env, Symbol};
 
 #[contracttype]
 pub enum OracleData {
@@ -23,48 +23,71 @@ pub fn fetch_pyth_price(_e: &Env, _config: &OracleConfig) -> Result<PythPrice, E
     Err(ErrorCode::OracleFailure)
 }
 
+pub fn cast_external_timestamp(timestamp: i64) -> Result<u64, ErrorCode> {
+    timestamp
+        .try_into()
+        .map_err(|_| ErrorCode::InvalidTimestamp)
+}
+
+pub fn is_stale(current_time: u64, result_time: u64, max_age_seconds: u64) -> bool {
+    current_time.saturating_sub(result_time) > max_age_seconds
+}
+
 pub fn validate_price(e: &Env, price: &PythPrice, config: &OracleConfig) -> Result<(), ErrorCode> {
-    let current_time = e.ledger().timestamp() as i64;
-    let age = current_time - price.publish_time;
-    
+    let current_time = e.ledger().timestamp();
+    let publish_time = cast_external_timestamp(price.publish_time)?;
+
     // Check freshness
-    if age > config.max_staleness_seconds as i64 {
+    if is_stale(current_time, publish_time, config.max_staleness_seconds) {
         return Err(ErrorCode::StalePrice);
     }
-    
+
     // Check confidence: conf should be < max_confidence_bps% of price
-    let price_abs = if price.price < 0 { -price.price } else { price.price } as u64;
+    let price_abs = if price.price < 0 {
+        -price.price
+    } else {
+        price.price
+    } as u64;
     let max_conf = (price_abs * config.max_confidence_bps) / 10000;
-    
+
     if price.conf > max_conf {
         return Err(ErrorCode::ConfidenceTooLow);
     }
-    
+
     Ok(())
 }
 
 pub fn resolve_with_pyth(e: &Env, market_id: u64, config: &OracleConfig) -> Result<u32, ErrorCode> {
     let price = fetch_pyth_price(e, config)?;
-    
+    let publish_time = cast_external_timestamp(price.publish_time)?;
+
     // Convert price to outcome (implementation depends on market logic)
     let outcome = determine_outcome(&price);
-    
+
     // Store result
-    e.storage().persistent().set(&OracleData::Result(market_id, 0), &outcome);
-    e.storage().persistent().set(&OracleData::LastUpdate(market_id, 0), &(price.publish_time as u64));
-    
+    e.storage()
+        .persistent()
+        .set(&OracleData::Result(market_id, 0), &outcome);
+    e.storage()
+        .persistent()
+        .set(&OracleData::LastUpdate(market_id, 0), &publish_time);
+
     // Publish event
     e.events().publish(
         (Symbol::new(e, "oracle_resolution"), market_id),
         (outcome, price.price, price.conf),
     );
-    
+
     Ok(outcome)
 }
 
 fn determine_outcome(price: &PythPrice) -> u32 {
     // Placeholder logic - real implementation would use market-specific threshold
-    if price.price > 0 { 0 } else { 1 }
+    if price.price > 0 {
+        0
+    } else {
+        1
+    }
 }
 
 pub fn get_oracle_result(e: &Env, market_id: u64, _config: &OracleConfig) -> Option<u32> {
