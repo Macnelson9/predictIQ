@@ -191,3 +191,21 @@ pub fn emit_fee_collected(e: &Env, _market_id: u64, contract_address: Address, a
     e.events()
         .publish((symbol_short!("fee_colct"), 0u64, contract_address), amount);
 }
+
+/// Issue #63: Emit AdminFallbackResolution event
+/// Emitted when an admin resolves a market that reached a voting deadlock
+/// (no 60% majority after the full voting period).
+///
+/// Topics: [adm_fallbk, market_id, admin]
+/// Data: (winning_outcome)
+pub fn emit_admin_fallback_resolution(
+    e: &Env,
+    market_id: u64,
+    admin: Address,
+    winning_outcome: u32,
+) {
+    e.events().publish(
+        (symbol_short!("adm_fallbk"), market_id, admin),
+        winning_outcome,
+    );
+}

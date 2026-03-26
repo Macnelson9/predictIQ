@@ -1,3 +1,4 @@
+use soroban_sdk::{contracttype, Address, Map, String, Vec};
 use soroban_sdk::{contracttype, Address, BytesN, Map, String, Vec};
 
 #[contracttype]
@@ -88,6 +89,9 @@ pub struct LockedTokens {
 pub struct OracleConfig {
     pub oracle_address: Address,
     pub feed_id: String,
+    pub min_responses: u32,
+    pub max_staleness_seconds: u64,
+    pub max_confidence_bps: u64,
     pub min_responses: Option<u32>,
     pub max_staleness_seconds: u64,
     pub max_confidence_bps: u64,
