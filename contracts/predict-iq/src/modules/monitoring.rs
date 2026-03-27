@@ -13,17 +13,17 @@ pub enum DataKey {
 pub fn track_error(e: &Env) {
     let mut count: u32 = e
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::ErrorCount)
         .unwrap_or(0);
     count += 1;
-    e.storage().persistent().set(&DataKey::ErrorCount, &count);
+    e.storage().instance().set(&DataKey::ErrorCount, &count);
     e.storage()
-        .persistent()
+        .instance()
         .set(&DataKey::LastObservation, &e.ledger().timestamp());
 
     if count > 10 {
-        e.storage().persistent().set(
+        e.storage().instance().set(
             &crate::types::ConfigKey::CircuitBreakerState,
             &crate::types::CircuitBreakerState::Open,
         );
@@ -37,17 +37,17 @@ pub fn track_error(e: &Env) {
 pub fn reset_monitoring(e: &Env) {
     let previous_error_count: u32 = e
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::ErrorCount)
         .unwrap_or(0);
     let previous_last_observation: u64 = e
         .storage()
-        .persistent()
+        .instance()
         .get(&DataKey::LastObservation)
         .unwrap_or(0);
 
-    e.storage().persistent().set(&DataKey::ErrorCount, &0u32);
-    e.storage().persistent().set(&DataKey::LastObservation, &0u64);
+    e.storage().instance().set(&DataKey::ErrorCount, &0u32);
+    e.storage().instance().set(&DataKey::LastObservation, &0u64);
 
     let resetter = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
     crate::modules::events::emit_monitoring_state_reset(
@@ -71,10 +71,10 @@ mod tests {
         track_error(&e);
         track_error(&e);
 
-        let before_count: u32 = e.storage().persistent().get(&DataKey::ErrorCount).unwrap_or(0);
+        let before_count: u32 = e.storage().instance().get(&DataKey::ErrorCount).unwrap_or(0);
         let before_obs: u64 = e
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::LastObservation)
             .unwrap_or(0);
         assert_eq!(before_count, 2);
@@ -82,10 +82,10 @@ mod tests {
 
         reset_monitoring(&e);
 
-        let after_count: u32 = e.storage().persistent().get(&DataKey::ErrorCount).unwrap_or(1);
+        let after_count: u32 = e.storage().instance().get(&DataKey::ErrorCount).unwrap_or(1);
         let after_obs: u64 = e
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::LastObservation)
             .unwrap_or(1);
 

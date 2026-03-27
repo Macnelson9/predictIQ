@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::modules::admin;
-use crate::types::{CircuitBreakerState, ConfigKey, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD};
+use crate::types::{CircuitBreakerState, ConfigKey};
 use soroban_sdk::Env;
 
 /// Cool-down period before Open transitions to HalfOpen (Issue #12).
@@ -14,12 +14,8 @@ pub enum DataKey {
     OpenedAt,
 }
 
-fn bump_gov_ttl(e: &Env) {
-    e.storage().persistent().extend_ttl(
-        &ConfigKey::CircuitBreakerState,
-        GOV_TTL_LOW_THRESHOLD,
-        GOV_TTL_HIGH_THRESHOLD,
-    );
+fn bump_gov_ttl(_e: &Env) {
+    // CircuitBreakerState is now in instance storage; no persistent TTL bump needed.
 }
 
 pub fn set_state(e: &Env, state: CircuitBreakerState) -> Result<(), ErrorCode> {
@@ -35,8 +31,10 @@ fn _set_state_internal(e: &Env, state: CircuitBreakerState) -> Result<(), ErrorC
             .set(&crate::modules::circuit_breaker::DataKey::OpenedAt, &e.ledger().timestamp());
     }
 
+    // Issue #38: CircuitBreakerState moved to instance storage so it stays
+    // co-located with OpenedAt and monitoring counters — all expire together.
     e.storage()
-        .persistent()
+        .instance()
         .set(&ConfigKey::CircuitBreakerState, &state);
     bump_gov_ttl(e);
 
@@ -54,7 +52,7 @@ fn _set_state_internal(e: &Env, state: CircuitBreakerState) -> Result<(), ErrorC
 
 pub fn get_state(e: &Env) -> CircuitBreakerState {
     e.storage()
-        .persistent()
+        .instance()
         .get(&ConfigKey::CircuitBreakerState)
         .unwrap_or(CircuitBreakerState::Closed)
 }

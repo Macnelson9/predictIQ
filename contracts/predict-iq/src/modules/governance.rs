@@ -166,11 +166,6 @@ pub fn vote_on_guardian_removal(e: &Env, voter: Address, approve: bool) -> Resul
 pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
 
-    // Validate WASM hash is not empty
-    if wasm_hash.is_empty() {
-        return Err(ErrorCode::InvalidWasmHash);
-    }
-
     require_no_upgrade_collision(e, &wasm_hash)?;
 
     // Check if an upgrade is already pending
@@ -195,7 +190,7 @@ pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode>
     Ok(())
 }
 
-fn require_no_upgrade_collision(e: &Env, wasm_hash: &String) -> Result<(), ErrorCode> {
+fn require_no_upgrade_collision(e: &Env, wasm_hash: &BytesN<32>) -> Result<(), ErrorCode> {
     if let Some(pending_upgrade) = get_pending_upgrade(e) {
         if pending_upgrade.wasm_hash == *wasm_hash {
             return Err(ErrorCode::UpgradeAlreadyPending);
@@ -213,20 +208,20 @@ fn require_no_upgrade_collision(e: &Env, wasm_hash: &String) -> Result<(), Error
     Ok(())
 }
 
-fn get_upgrade_rejected_at(e: &Env, wasm_hash: &String) -> Option<u64> {
+fn get_upgrade_rejected_at(e: &Env, wasm_hash: &BytesN<32>) -> Option<u64> {
     e.storage()
         .persistent()
         .get(&ConfigKey::UpgradeRejectedAt(wasm_hash.clone()))
 }
 
-fn set_upgrade_rejected_at(e: &Env, wasm_hash: &String) {
+fn set_upgrade_rejected_at(e: &Env, wasm_hash: &BytesN<32>) {
     e.storage().persistent().set(
         &ConfigKey::UpgradeRejectedAt(wasm_hash.clone()),
         &e.ledger().timestamp(),
     );
 }
 
-fn clear_upgrade_rejected_at(e: &Env, wasm_hash: &String) {
+fn clear_upgrade_rejected_at(e: &Env, wasm_hash: &BytesN<32>) {
     e.storage()
         .persistent()
         .remove(&ConfigKey::UpgradeRejectedAt(wasm_hash.clone()));
@@ -398,7 +393,7 @@ pub fn emergency_pause(e: &Env, voter: Address) -> Result<(), ErrorCode> {
     }
 
     // Trigger emergency pause
-    e.storage().persistent().set(
+    e.storage().instance().set(
         &ConfigKey::CircuitBreakerState,
         &crate::types::CircuitBreakerState::Paused,
     );

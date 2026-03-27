@@ -19,23 +19,23 @@ pub fn attempt_oracle_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCod
         return Err(ErrorCode::ResolutionNotReady);
     }
 
-    // Attempt oracle resolution
-    if let Some(oracle_outcome) = oracles::get_oracle_result(e, market_id, &market.oracle_config) {
-        market.status = MarketStatus::PendingResolution;
-        market.winning_outcome = Some(oracle_outcome);
-        market.pending_resolution_timestamp = Some(e.ledger().timestamp());
+    // Issue #25: Attempt live Pyth oracle resolution.
+    // resolve_with_pyth fetches the price, validates freshness + confidence,
+    // stores the result, and returns the winning outcome index.
+    let oracle_outcome = oracles::resolve_with_pyth(e, market_id, 0, &market.oracle_config)?;
 
-        markets::update_market(e, market);
+    market.status = MarketStatus::PendingResolution;
+    market.winning_outcome = Some(oracle_outcome);
+    market.pending_resolution_timestamp = Some(e.ledger().timestamp());
 
-        e.events().publish(
-            (Symbol::new(e, "oracle_resolved"), market_id),
-            oracle_outcome,
-        );
+    markets::update_market(e, market);
 
-        Ok(())
-    } else {
-        Err(ErrorCode::OracleFailure)
-    }
+    e.events().publish(
+        (Symbol::new(e, "oracle_resolved"), market_id),
+        oracle_outcome,
+    );
+
+    Ok(())
 }
 
 pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {

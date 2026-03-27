@@ -46,7 +46,7 @@ fn create_config(e: &Env, max_confidence_bps: u64) -> OracleConfig {
     OracleConfig {
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "test_feed"),
-        min_responses: Some(1),
+        min_responses: 1,
         max_staleness_seconds: 3600,
         max_confidence_bps,
     }
@@ -500,5 +500,74 @@ fn test_multi_oracle_collision_mitigation() {
             "Collision scenario failed ({}, {}, {}): second key returned wrong value. Scenario: {}",
             m2, o2, v2, scenario_desc
         );
+    }
+}
+
+// =============================================================================
+// Issue #25: fetch_pyth_price cross-contract call tests
+// =============================================================================
+
+#[cfg(feature = "testutils")]
+mod pyth_integration_tests {
+    use super::*;
+    use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, BytesN, Env, String};
+    use crate::modules::oracles::{fetch_pyth_price, PythPrice};
+    use crate::types::OracleConfig;
+
+    /// Minimal mock Pyth contract that returns a fixed price for any feed_id.
+    #[contract]
+    pub struct MockPythContract;
+
+    #[contractimpl]
+    impl MockPythContract {
+        pub fn get_price(_env: Env, _feed_id: BytesN<32>) -> (i64, u64, i32, i64) {
+            // BTC/USD: $50,000.00 with 2% confidence, expo -2, recent timestamp
+            (5_000_000i64, 100_000u64, -2i32, 1_700_000_000i64)
+        }
+    }
+
+    fn valid_feed_id(e: &Env) -> String {
+        // 64-char hex string representing a 32-byte Pyth price feed ID
+        String::from_str(e, "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43")
+    }
+
+    #[test]
+    fn test_fetch_pyth_price_returns_price_from_contract() {
+        let e = Env::default();
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: valid_feed_id(&e),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+
+        let result = fetch_pyth_price(&e, &config);
+        assert!(result.is_ok(), "fetch_pyth_price should succeed with a valid mock contract");
+
+        let price = result.unwrap();
+        assert_eq!(price.price, 5_000_000);
+        assert_eq!(price.conf, 100_000);
+        assert_eq!(price.expo, -2);
+        assert_eq!(price.publish_time, 1_700_000_000);
+    }
+
+    #[test]
+    fn test_fetch_pyth_price_fails_with_invalid_feed_id() {
+        let e = Env::default();
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: String::from_str(&e, "not_a_valid_hex_feed_id"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+
+        let result = fetch_pyth_price(&e, &config);
+        assert_eq!(result, Err(crate::errors::ErrorCode::OracleFailure));
     }
 }
