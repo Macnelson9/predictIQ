@@ -1,7 +1,10 @@
 use crate::errors::ErrorCode;
 use crate::modules::admin;
-use crate::types::{ConfigKey, MarketTier};
-use soroban_sdk::{contracttype, Address, Env};
+use crate::types::{ConfigKey, MarketTier, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
+
+const BPS_DENOMINATOR: i128 = 10_000;
+const TIER_DENOMINATOR_BPS: i128 = 10_000;
 
 #[contracttype]
 pub enum DataKey {
@@ -33,20 +36,30 @@ pub fn set_base_fee(e: &Env, amount: i128) -> Result<(), ErrorCode> {
 
 pub fn calculate_fee(e: &Env, amount: i128) -> i128 {
     let base_fee = get_base_fee(e);
-    (amount * base_fee) / 10000
+    amount.saturating_mul(base_fee) / BPS_DENOMINATOR
 }
 
-/// Issue #39: Multiply first, then divide to avoid precision loss on small amounts.
+fn tier_multiplier_bps(tier: &MarketTier) -> i128 {
+    match tier {
+        MarketTier::Basic => TIER_DENOMINATOR_BPS,
+        MarketTier::Pro => 7_500,           // 25% discount
+        MarketTier::Institutional => 5_000, // 50% discount
+    }
+}
+
+fn calculate_tiered_fee_with_base(amount: i128, base_fee_bps: i128, tier: &MarketTier) -> i128 {
+    // Single-pass high-precision arithmetic: amount * base_fee_bps * tier_multiplier / (10_000 * 10_000)
+    // This avoids early truncation from computing discounted base_fee first.
+    let numerator = amount
+        .saturating_mul(base_fee_bps)
+        .saturating_mul(tier_multiplier_bps(tier));
+    numerator / (BPS_DENOMINATOR * TIER_DENOMINATOR_BPS)
+}
+
+/// Issue #39: multiply before divide and keep tier multipliers in bps.
 pub fn calculate_tiered_fee(e: &Env, amount: i128, tier: &MarketTier) -> i128 {
     let base_fee = get_base_fee(e);
-
-    let adjusted_fee = match tier {
-        MarketTier::Basic => base_fee,
-        MarketTier::Pro => (base_fee * 75) / 100,
-        MarketTier::Institutional => (base_fee * 50) / 100,
-    };
-
-    (amount * adjusted_fee) / 10000
+    calculate_tiered_fee_with_base(amount, base_fee, tier)
 }
 
 pub fn collect_fee(e: &Env, token: Address, amount: i128) {
@@ -152,4 +165,40 @@ pub fn claim_referral_rewards(
     crate::modules::events::emit_referral_claimed(e, 0, address.clone(), balance);
 
     Ok(balance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calculate_tiered_fee_with_base, MarketTier};
+
+    #[test]
+    fn tiered_fee_keeps_fractional_discount_precision() {
+        // 1 bps base fee with Pro tier (25% discount):
+        // old math: ((1 * 75) / 100) = 0 bps => zero fee for all amounts.
+        // new math preserves the discounted 0.75 bps effect until final division.
+        let basic_fee = calculate_tiered_fee_with_base(4_000_000, 1, &MarketTier::Basic);
+        let pro_fee = calculate_tiered_fee_with_base(4_000_000, 1, &MarketTier::Pro);
+        assert_eq!(basic_fee, 400);
+        assert_eq!(pro_fee, 300);
+    }
+
+    #[test]
+    fn tiered_fee_uses_expected_discount_ratio() {
+        let basic_fee = calculate_tiered_fee_with_base(10_000, 100, &MarketTier::Basic);
+        let pro_fee = calculate_tiered_fee_with_base(10_000, 100, &MarketTier::Pro);
+        let inst_fee = calculate_tiered_fee_with_base(10_000, 100, &MarketTier::Institutional);
+
+        assert_eq!(basic_fee, 100);
+        assert_eq!(pro_fee, 75);
+        assert_eq!(inst_fee, 50);
+    }
+
+    #[test]
+    fn four_unit_bet_applies_pro_discount() {
+        let basic_fee = calculate_tiered_fee_with_base(4, 10_000, &MarketTier::Basic);
+        let pro_fee = calculate_tiered_fee_with_base(4, 10_000, &MarketTier::Pro);
+
+        assert_eq!(basic_fee, 4);
+        assert_eq!(pro_fee, 3);
+    }
 }

@@ -1,3 +1,4 @@
+use soroban_sdk::{contracttype, Address, Map, String, Vec};
 use soroban_sdk::{contracttype, Address, BytesN, Map, String, Vec};
 
 #[contracttype]
@@ -88,6 +89,12 @@ pub struct LockedTokens {
 pub struct OracleConfig {
     pub oracle_address: Address,
     pub feed_id: String,
+    pub min_responses: u32,
+    pub max_staleness_seconds: u64,
+    pub max_confidence_bps: u64,
+    pub min_responses: Option<u32>,
+    pub max_staleness_seconds: u64,
+    pub max_confidence_bps: u64,
     pub min_responses: Option<u32>, // Optimized: None defaults to 1
     pub max_staleness_seconds: u64, // Max age of price data in seconds
     pub max_confidence_bps: u64,    // Max confidence interval in basis points
@@ -113,6 +120,7 @@ pub enum ConfigKey {
     GuardianSet,
     PendingUpgrade,
     UpgradeVotes,
+    UpgradeRejectedAt(String),
     GovernanceToken,
     MaxPushPayoutWinners,
     PendingGuardianRemoval,
@@ -144,6 +152,10 @@ pub struct PendingUpgrade {
     pub votes_against: Vec<Address>,
 }
 
+// Constants for upgrade governance
+pub const TIMELOCK_DURATION: u64 = 48 * 60 * 60; // 48 hours in seconds
+pub const MAJORITY_THRESHOLD_PERCENT: u32 = 51; // 51% for majority
+pub const UPGRADE_COOLDOWN_DURATION: u64 = 7 * 24 * 60 * 60; // 7 days in seconds
 /// Issue #13: Default timelock — 48 hours. Overridable via ConfigKey::TimelockDuration.
 pub const TIMELOCK_DURATION: u64 = 48 * 60 * 60;
 pub const MAJORITY_THRESHOLD_PERCENT: u32 = 51;

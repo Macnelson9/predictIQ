@@ -1,5 +1,8 @@
 #![cfg(test)]
 use super::*;
+use crate::modules::markets::{self, DataKey};
+use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::{token, Address, Env, String, Vec};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{token, Address, BytesN, Env, String, Vec};
 
@@ -43,6 +46,9 @@ fn create_test_market(
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -61,6 +67,34 @@ fn create_test_market(
         &0,
         &0,
     )
+}
+
+fn make_stored_market(e: &Env, id: u64) -> types::Market {
+    let mut options = Vec::new(e);
+    options.push_back(String::from_str(e, "Yes"));
+    options.push_back(String::from_str(e, "No"));
+
+    types::Market {
+        id,
+        creator: Address::generate(e),
+        description: String::from_str(e, "Seeded Market"),
+        options,
+        status: types::MarketStatus::Active,
+        deadline: 1000,
+        resolution_deadline: 2000,
+        winning_outcome: None,
+        oracle_config: types::OracleConfig {
+            oracle_address: Address::generate(e),
+            feed_id: String::from_str(e, "seeded_feed"),
+            min_responses: Some(1),
+        },
+        total_staked: 0,
+        payout_mode: types::PayoutMode::Pull,
+        tier: types::MarketTier::Basic,
+        creation_deposit: 0,
+        parent_id: 0,
+        parent_outcome_idx: 0,
+    }
 }
 
 #[test]
@@ -89,6 +123,9 @@ fn test_market_creation_fails_without_deposit() {
         &types::OracleConfig {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "test"),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
             min_responses: Some(1),
             max_staleness_seconds: 3600,
             max_confidence_bps: 200,
@@ -132,6 +169,124 @@ fn test_market_creation_with_sufficient_deposit() {
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.creation_deposit, 0);
     assert_eq!(market.tier, types::MarketTier::Basic);
+}
+
+#[test]
+fn test_market_ids_are_unique_and_sequential() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let mut previous_id = 0u64;
+
+    for expected_id in 1..=1_000u64 {
+        let market_id = create_test_market(
+            &client,
+            &e,
+            &creator,
+            types::MarketTier::Basic,
+            &native_token,
+        );
+
+        assert_eq!(market_id, expected_id);
+        assert!(market_id > previous_id);
+        previous_id = market_id;
+    }
+}
+
+#[test]
+fn test_market_id_overflow_returns_error() {
+    let (e, _admin, contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    e.as_contract(&contract_id, || {
+        e.storage().instance().set(&DataKey::MarketCount, &u64::MAX);
+    });
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let result = client.try_create_market(
+        &creator,
+        &String::from_str(&e, "Overflow Market"),
+        &{
+            let mut opts = Vec::new(&e);
+            opts.push_back(String::from_str(&e, "Yes"));
+            opts.push_back(String::from_str(&e, "No"));
+            opts
+        },
+        &1000,
+        &2000,
+        &types::OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "overflow_feed"),
+            min_responses: Some(1),
+        },
+        &types::MarketTier::Basic,
+        &native_token,
+        &0,
+        &0,
+    );
+
+    assert_eq!(result, Err(Ok(ErrorCode::MarketIdOverflow)));
+}
+
+#[test]
+fn test_market_id_collision_returns_error() {
+    let (e, _admin, contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    e.as_contract(&contract_id, || {
+        e.storage().instance().set(&DataKey::MarketCount, &1u64);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Market(2), &make_stored_market(&e, 2));
+    });
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let result = client.try_create_market(
+        &creator,
+        &String::from_str(&e, "Collision Market"),
+        &{
+            let mut opts = Vec::new(&e);
+            opts.push_back(String::from_str(&e, "Yes"));
+            opts.push_back(String::from_str(&e, "No"));
+            opts
+        },
+        &1000,
+        &2000,
+        &types::OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "collision_feed"),
+            min_responses: Some(1),
+        },
+        &types::MarketTier::Basic,
+        &native_token,
+        &0,
+        &0,
+    );
+
+    assert_eq!(result, Err(Ok(ErrorCode::MarketIdCollision)));
+}
+
+#[test]
+fn test_market_id_allocator_simulates_one_million_unique_ids() {
+    let (e, _admin, contract_id, _client) = setup_test_env();
+
+    let mut last_id = 0u64;
+    e.as_contract(&contract_id, || {
+        for expected_id in 1..=1_000_000u64 {
+            let allocated_id = markets::allocate_market_id(&e).unwrap();
+            assert_eq!(allocated_id, expected_id);
+            last_id = allocated_id;
+        }
+    });
+
+    assert_eq!(last_id, 1_000_000);
 }
 
 #[test]
@@ -808,6 +963,165 @@ fn test_persistent_state_preserved_on_upgrade() {
     assert_eq!(stored_admin, admin);
 }
 
+#[test]
+fn test_same_hash_cannot_be_reinitiated_while_pending() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = String::from_str(&e, "repeat_hash");
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+
+    client.initiate_upgrade(&wasm_hash);
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeAlreadyPending)));
+}
+
+#[test]
+fn test_different_hash_still_blocked_while_another_upgrade_is_pending() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let hash_a = String::from_str(&e, "hash_a");
+    let hash_b = String::from_str(&e, "hash_b");
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+
+    client.initiate_upgrade(&hash_a);
+
+    let result = client.try_initiate_upgrade(&hash_b);
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
+#[test]
+fn test_rejected_hash_blocked_during_cooldown() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = String::from_str(&e, "cooldown_hash");
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeHashInCooldown)));
+}
+
+#[test]
+fn test_rejected_hash_allowed_after_cooldown_expires() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = String::from_str(&e, "reinit_hash");
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1000 + types::TIMELOCK_DURATION + 1 + types::UPGRADE_COOLDOWN_DURATION + 1
+    });
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_rejected_hash_still_blocked_at_exact_cooldown_boundary() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = String::from_str(&e, "boundary_hash");
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1000 + types::TIMELOCK_DURATION + 1 + types::UPGRADE_COOLDOWN_DURATION
+    });
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeHashInCooldown)));
+}
+
 // ===================== Conditional/Chained Market Tests (Issue #25) =====================
 
 #[test]
@@ -838,6 +1152,9 @@ fn test_create_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -890,6 +1207,9 @@ fn test_create_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -942,6 +1262,9 @@ fn test_create_conditional_market_success() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -1003,6 +1326,9 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -1064,6 +1390,9 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -1146,6 +1475,9 @@ fn test_multi_level_conditional_markets() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
@@ -1216,6 +1548,9 @@ fn test_create_conditional_market_invalid_parent_outcome_idx() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,

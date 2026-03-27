@@ -203,6 +203,24 @@ impl PredictIQ {
         crate::modules::resolution::finalize_resolution(&e, market_id)
     }
 
+    /// Issue #63: Administrative fallback for disputed markets that failed to
+    /// reach the 60% community majority threshold after the full voting period.
+    ///
+    /// Only callable by the master admin. Enforces that:
+    ///   - The market is still Disputed (not already resolved).
+    ///   - The 72-hour voting window has fully elapsed.
+    ///   - Community voting genuinely deadlocked (NoMajorityReached).
+    ///
+    /// This ensures user capital is never permanently orphaned while keeping
+    /// the community-first resolution path intact.
+    pub fn admin_fallback_resolution(
+        e: Env,
+        market_id: u64,
+        winning_outcome: u32,
+    ) -> Result<(), ErrorCode> {
+        crate::modules::resolution::admin_fallback_resolution(&e, market_id, winning_outcome)
+    }
+
     pub fn reset_monitoring(e: Env) -> Result<(), ErrorCode> {
         crate::modules::admin::require_admin(&e)?;
         crate::modules::monitoring::reset_monitoring(&e);

@@ -43,7 +43,7 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
 
     match market.status {
         MarketStatus::PendingResolution => {
-            // Check if 24h dispute window has passed
+            // Check if 48h dispute window has passed
             let pending_ts = market
                 .pending_resolution_timestamp
                 .ok_or(ErrorCode::ResolutionNotReady)?;
@@ -69,12 +69,12 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
             let dispute_ts = market
                 .dispute_timestamp
                 .ok_or(ErrorCode::MarketNotDisputed)?;
-            let dispute_ts = market.pending_resolution_timestamp.ok_or(ErrorCode::MarketNotDisputed)?;
             if e.ledger().timestamp() < dispute_ts + VOTING_PERIOD_SECONDS {
                 return Err(ErrorCode::TimelockActive);
             }
 
-            // Calculate voting outcome
+            // Calculate voting outcome — returns NoMajorityReached if < 60% consensus.
+            // In that case the market stays Disputed; admin_fallback_resolution must be used.
             let winning_outcome = calculate_voting_outcome(e, &market)?;
 
             market.status = MarketStatus::Resolved;
@@ -94,6 +94,73 @@ pub fn finalize_resolution(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
     }
 }
 
+/// Issue #63: Administrative fallback for disputed markets that failed to reach
+/// the 60% majority threshold after the full voting period.
+///
+/// Preconditions (all enforced on-chain):
+///   1. Caller must be the master admin.
+///   2. Market must still be in `Disputed` status (not already resolved/cancelled).
+///   3. The 72-hour community voting period must have fully elapsed.
+///   4. Community voting must have genuinely failed — `calculate_voting_outcome`
+///      must return `NoMajorityReached` (prevents admin from bypassing a valid vote).
+///   5. `winning_outcome` must be a valid index into `market.options`.
+///
+/// This guarantees that user capital is never permanently orphaned while
+/// preserving the integrity of the community-first resolution path.
+pub fn admin_fallback_resolution(
+    e: &Env,
+    market_id: u64,
+    winning_outcome: u32,
+) -> Result<(), ErrorCode> {
+    // 1. Admin-only gate
+    crate::modules::admin::require_admin(e)?;
+
+    let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
+
+    // 2. Market must be stuck in Disputed — not already resolved or cancelled
+    if market.status != MarketStatus::Disputed {
+        return Err(ErrorCode::MarketNotDisputed);
+    }
+
+    // 3. Voting period must have fully elapsed
+    let dispute_ts = market
+        .dispute_timestamp
+        .ok_or(ErrorCode::MarketNotDisputed)?;
+    if e.ledger().timestamp() < dispute_ts + VOTING_PERIOD_SECONDS {
+        return Err(ErrorCode::VotingPeriodNotElapsed);
+    }
+
+    // 4. Community vote must have genuinely deadlocked — only allow fallback when
+    //    calculate_voting_outcome returns NoMajorityReached.  Any other error
+    //    (e.g. TooManyOutcomes) is surfaced directly so it can be fixed separately.
+    match calculate_voting_outcome(e, &market) {
+        Ok(_) => {
+            // A clear majority exists — admin must not override it; use finalize_resolution instead.
+            return Err(ErrorCode::CannotChangeOutcome);
+        }
+        Err(ErrorCode::NoMajorityReached) => {
+            // Confirmed deadlock — proceed with admin fallback.
+        }
+        Err(other) => return Err(other),
+    }
+
+    // 5. Validate the admin-chosen outcome index
+    if winning_outcome >= market.options.len() {
+        return Err(ErrorCode::InvalidOutcome);
+    }
+
+    // Resolve the market with the admin-chosen outcome
+    market.status = MarketStatus::Resolved;
+    market.winning_outcome = Some(winning_outcome);
+    market.resolved_at = Some(e.ledger().timestamp());
+    markets::update_market(e, market);
+
+    let admin = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
+    crate::modules::events::emit_admin_fallback_resolution(e, market_id, admin, winning_outcome);
+
+    Ok(())
+}
+
 /// Single-pass O(n) tally. n is bounded by MAX_OUTCOMES_PER_MARKET (32).
 fn calculate_voting_outcome(e: &Env, market: &crate::types::Market) -> Result<u32, ErrorCode> {
     let num_outcomes = market.options.len();
@@ -103,9 +170,6 @@ fn calculate_voting_outcome(e: &Env, market: &crate::types::Market) -> Result<u3
     }
 
     let mut total_votes: i128 = 0;
-    let mut tallies: soroban_sdk::Vec<(u32, i128)> = soroban_sdk::Vec::new(e);
-
-    for outcome in 0..market.options.len() {
     let mut max_outcome = 0u32;
     let mut max_votes = 0i128;
 
@@ -122,20 +186,8 @@ fn calculate_voting_outcome(e: &Env, market: &crate::types::Market) -> Result<u3
         return Err(ErrorCode::NoMajorityReached);
     }
 
-    // Find outcome with highest votes
-    let mut max_outcome = 0u32;
-    let mut max_votes = 0i128;
-
-    for i in 0..tallies.len() {
-        let (outcome, votes) = tallies.get(i).unwrap();
-        if votes > max_votes {
-            max_votes = votes;
-            max_outcome = outcome;
-        }
-    }
-
-    // Check if majority exceeds 60%
-    let majority_pct = (max_votes * 10000) / total_votes;
+    // Check if the leading outcome exceeds the 60% supermajority threshold
+    let majority_pct = (max_votes * 10_000) / total_votes;
     if majority_pct >= MAJORITY_THRESHOLD_BPS {
         Ok(max_outcome)
     } else {
