@@ -140,7 +140,7 @@ pub fn place_bet(
     if let Some(ref r) = referrer {
         let fee = crate::modules::fees::calculate_fee(e, amount);
         if fee > 0 {
-            crate::modules::fees::add_referral_reward(e, r, fee);
+            crate::modules::fees::add_referral_reward(e, r, &token_address, fee);
         }
     }
 

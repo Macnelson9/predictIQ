@@ -148,7 +148,6 @@ pub fn claim_referral_rewards(
     e.storage().persistent().set(&key, &0i128);
 
     let client = soroban_sdk::token::Client::new(e, token);
-    e.current_contract_address().require_auth();
     client.transfer(&e.current_contract_address(), address, &balance);
 
     crate::modules::events::emit_referral_claimed(e, 0, address.clone(), balance);
