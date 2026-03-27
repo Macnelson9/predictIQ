@@ -209,3 +209,23 @@ pub fn emit_admin_fallback_resolution(
         winning_outcome,
     );
 }
+
+/// Emit CreatorReputationSet event
+/// Topics: [rep_set, creator]
+/// Data: (old_score, new_score)
+pub fn emit_creator_reputation_set(e: &Env, creator: Address, old_score: u32, new_score: u32) {
+    e.events().publish(
+        (symbol_short!("rep_set"), creator),
+        (old_score, new_score),
+    );
+}
+
+/// Emit CreationDepositSet event
+/// Topics: [dep_set]
+/// Data: (old_amount, new_amount)
+pub fn emit_creation_deposit_set(e: &Env, old_amount: i128, new_amount: i128) {
+    e.events().publish(
+        (symbol_short!("dep_set"),),
+        (old_amount, new_amount),
+    );
+}

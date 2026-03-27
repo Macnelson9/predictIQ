@@ -11,6 +11,7 @@ pub enum DataKey {
     MarketCount,
     CreatorReputation(Address),
     OutcomeStake(u64, u32), // market_id, outcome
+    Config(ConfigKey),
 }
 
 pub fn create_market(
@@ -235,29 +236,33 @@ pub fn set_creator_reputation(
     reputation: CreatorReputation,
 ) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
+    let old = get_creator_reputation(e, &creator);
     e.storage()
         .persistent()
-        .set(&DataKey::CreatorReputation(creator), &reputation);
+        .set(&DataKey::CreatorReputation(creator.clone()), &reputation);
+    crate::modules::events::emit_creator_reputation_set(e, creator, old.score, reputation.score);
     Ok(())
 }
 
 pub fn get_creation_deposit(e: &Env) -> i128 {
     e.storage()
         .persistent()
-        .get(&ConfigKey::CreationDeposit)
+        .get(&DataKey::Config(ConfigKey::CreationDeposit))
         .unwrap_or(0)
 }
 
 pub fn set_creation_deposit(e: &Env, amount: i128) -> Result<(), ErrorCode> {
     crate::modules::admin::require_admin(e)?;
+    let old = get_creation_deposit(e);
     e.storage()
         .persistent()
-        .set(&ConfigKey::CreationDeposit, &amount);
+        .set(&DataKey::Config(ConfigKey::CreationDeposit), &amount);
     e.storage().persistent().extend_ttl(
-        &ConfigKey::CreationDeposit,
+        &DataKey::Config(ConfigKey::CreationDeposit),
         crate::types::GOV_TTL_LOW_THRESHOLD,
         crate::types::GOV_TTL_HIGH_THRESHOLD,
     );
+    crate::modules::events::emit_creation_deposit_set(e, old, amount);
     Ok(())
 }
 
@@ -284,12 +289,13 @@ pub fn release_creation_deposit(
     }
 
     if market.creation_deposit > 0 {
+        let amount = market.creation_deposit;
+        let creator = market.creator.clone();
+        let mut market = market;
+        market.creation_deposit = 0;
+        update_market(e, market);
         let token_client = token::Client::new(e, &native_token);
-        token_client.transfer(
-            &e.current_contract_address(),
-            &market.creator,
-            &market.creation_deposit,
-        );
+        token_client.transfer(&e.current_contract_address(), &creator, &amount);
     }
 
     Ok(())
