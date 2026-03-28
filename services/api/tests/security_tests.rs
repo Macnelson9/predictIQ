@@ -81,7 +81,7 @@ mod tests {
         let payload = b"test payload";
         let secret = "test-secret";
 
-        let signature = signing::generate_signature(payload, secret);
+        let signature = signing::generate_signature(payload, secret).unwrap();
         assert!(signing::verify_signature(payload, &signature, secret));
 
         // Wrong payload should fail
@@ -105,5 +105,38 @@ mod tests {
         assert_eq!(sanitize::numeric_id("  456  "), Some(456));
         assert_eq!(sanitize::numeric_id("abc"), None);
         assert_eq!(sanitize::numeric_id("12.34"), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // #290: generate_signature — fallible API + panic-safety tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn generate_signature_returns_ok_for_valid_inputs() {
+        let sig = signing::generate_signature(b"hello", "secret");
+        assert!(sig.is_ok(), "expected Ok for valid payload and secret");
+    }
+
+    #[test]
+    fn generate_signature_ok_is_verifiable() {
+        let payload = b"data";
+        let secret = "key";
+        let sig = signing::generate_signature(payload, secret).unwrap();
+        assert!(signing::verify_signature(payload, &sig, secret));
+    }
+
+    #[test]
+    fn generate_signature_empty_secret_returns_err() {
+        // HMAC rejects a zero-length key; previously this would have panicked
+        // via .expect(). Now it must surface as Err(SigningError::InvalidKey).
+        let result = signing::generate_signature(b"payload", "");
+        assert_eq!(result, Err(signing::SigningError::InvalidKey));
+    }
+
+    #[test]
+    fn generate_signature_error_is_display_safe() {
+        // Ensure the error can be formatted without panicking (used in logs/responses).
+        let err = signing::SigningError::InvalidKey;
+        assert!(!err.to_string().is_empty());
     }
 }

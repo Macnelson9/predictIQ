@@ -341,13 +341,30 @@ pub mod signing {
         mac.verify_slice(&expected).is_ok()
     }
 
-    pub fn generate_signature(payload: &[u8], secret: &str) -> String {
-        let mut mac =
-            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    pub fn generate_signature(payload: &[u8], secret: &str) -> Result<String, SigningError> {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|_| SigningError::InvalidKey)?;
         mac.update(payload);
         let result = mac.finalize();
-        BASE64.encode(result.into_bytes())
+        Ok(BASE64.encode(result.into_bytes()))
     }
+
+    /// Error type for fallible signing operations.
+    #[derive(Debug, PartialEq)]
+    pub enum SigningError {
+        /// The secret key was rejected by the HMAC constructor (empty key).
+        InvalidKey,
+    }
+
+    impl std::fmt::Display for SigningError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                SigningError::InvalidKey => write!(f, "signing key is invalid"),
+            }
+        }
+    }
+
+    impl std::error::Error for SigningError {}
 }
 
 #[derive(Serialize)]
