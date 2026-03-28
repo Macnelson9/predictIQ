@@ -988,3 +988,91 @@ fn test_dispute_window_boundary_plus_one_finalize_allowed() {
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.status, types::MarketStatus::Resolved);
 }
+
+// ── Issue #244: Disputed markets must use dispute_timestamp for the 72h voting window ──
+//
+// Before the fix, finalize_resolution in the Disputed arm could have been
+// reading pending_resolution_timestamp instead of dispute_timestamp, meaning
+// a market disputed long after oracle resolution could be finalized too early.
+//
+// These tests prove that only dispute_timestamp + 72h gates finalization,
+// regardless of when pending_resolution_timestamp was set.
+
+/// Disputed market cannot finalize before dispute_timestamp + 72h,
+/// even when pending_resolution_timestamp + 72h has already elapsed.
+#[test]
+fn test_disputed_market_uses_dispute_timestamp_not_pending_ts() {
+    let (e, _admin, _, client) = setup_test_env();
+
+    // Oracle resolves at T=10_000 → pending_resolution_timestamp = 10_000
+    let market_id = setup_pending_market(&client, &e);
+
+    // Dispute filed at T=10_001 (well within the 72h window)
+    // → dispute_timestamp = 10_001
+    let disputer = Address::generate(&e);
+    e.ledger().with_mut(|li| li.timestamp = 10_001);
+    client.file_dispute(&disputer, &market_id);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, types::MarketStatus::Disputed);
+    assert_eq!(market.dispute_timestamp, Some(10_001));
+
+    // pending_resolution_timestamp + 72h = 10_000 + 259_200 = 269_200
+    // dispute_timestamp       + 72h = 10_001 + 259_200 = 269_201
+    //
+    // At T=269_200: pending window has elapsed but dispute window has NOT.
+    // Finalize must be REJECTED.
+    e.ledger().with_mut(|li| li.timestamp = 269_200);
+    let result = client.try_finalize_resolution(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::TimelockActive)));
+
+    // At T=269_201: dispute_timestamp + 72h has elapsed → finalize ALLOWED.
+    e.ledger().with_mut(|li| li.timestamp = 269_201);
+    // No votes cast → NoMajorityReached, so finalize will still error,
+    // but the error must be NoMajorityReached — NOT TimelockActive.
+    let result = client.try_finalize_resolution(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::NoMajorityReached)));
+}
+
+/// Disputed market with a majority vote finalizes correctly after
+/// dispute_timestamp + 72h (not pending_resolution_timestamp + 72h).
+#[test]
+fn test_disputed_market_finalizes_after_dispute_timestamp_plus_72h() {
+    let (e, _admin, _, client) = setup_test_env();
+
+    let token_admin = Address::generate(&e);
+    let token_id = e.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_address = token_id.address();
+    let token_client = token::StellarAssetClient::new(&e, &token_address);
+    client.set_governance_token(&token_address);
+
+    // Oracle resolves at T=10_000
+    let market_id = setup_pending_market(&client, &e);
+
+    // Dispute filed at T=50_000 → dispute_timestamp = 50_000
+    let disputer = Address::generate(&e);
+    e.ledger().with_mut(|li| li.timestamp = 50_000);
+    client.file_dispute(&disputer, &market_id);
+
+    // Cast a clear 70% majority for outcome 1
+    let voter = Address::generate(&e);
+    token_client.mint(&voter, &7000);
+    client.cast_vote(&voter, &market_id, &1, &7000);
+    let voter2 = Address::generate(&e);
+    token_client.mint(&voter2, &3000);
+    client.cast_vote(&voter2, &market_id, &0, &3000);
+
+    // dispute_timestamp + 72h = 50_000 + 259_200 = 309_200
+    // Attempt one second early → must be REJECTED
+    e.ledger().with_mut(|li| li.timestamp = 309_199);
+    let result = client.try_finalize_resolution(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::TimelockActive)));
+
+    // At exact boundary → must SUCCEED
+    e.ledger().with_mut(|li| li.timestamp = 309_200);
+    client.finalize_resolution(&market_id);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, types::MarketStatus::Resolved);
+    assert_eq!(market.winning_outcome, Some(1));
+}
