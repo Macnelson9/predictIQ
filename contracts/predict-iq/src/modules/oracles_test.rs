@@ -568,6 +568,189 @@ mod pyth_integration_tests {
         let result = fetch_pyth_price(&e, &config);
         assert_eq!(result, Err(crate::errors::ErrorCode::OracleFailure));
     }
+
+    // -------------------------------------------------------------------------
+    // Oracle failure path / retry cadence tests
+    //
+    // These tests use attempt_oracle_resolution at the contract level so they
+    // exercise the full path: fetch → validate → write → market state update.
+    // A bad feed_id is the simplest way to force OracleFailure without a mock
+    // that panics, because decode_feed_id rejects it before the cross-contract
+    // call, giving a deterministic failure with no partial storage writes.
+    // -------------------------------------------------------------------------
+
+    use crate::{PredictIQ, PredictIQClient};
+    use crate::types::{MarketStatus, MarketTier};
+    use soroban_sdk::{testutils::Ledger as _, Vec};
+
+    fn setup_contract_with_bad_oracle(e: &Env) -> (PredictIQClient<'static>, u64) {
+        e.mock_all_auths();
+        let contract_id = e.register(PredictIQ, ());
+        let client = PredictIQClient::new(e, &contract_id);
+        let admin = Address::generate(e);
+        client.initialize(&admin, &100);
+
+        // Oracle config with an invalid feed_id — fetch_pyth_price will return
+        // OracleFailure before touching any storage.
+        let bad_config = OracleConfig {
+            oracle_address: Address::generate(e),
+            feed_id: String::from_str(e, "not_hex"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+        let token = Address::generate(e);
+        let options = Vec::from_array(e, [
+            soroban_sdk::String::from_str(e, "Yes"),
+            soroban_sdk::String::from_str(e, "No"),
+        ]);
+        let market_id = client.create_market(
+            &admin,
+            &soroban_sdk::String::from_str(e, "Oracle test market"),
+            &options,
+            &1000,
+            &2000,
+            &bad_config,
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        );
+        (client, market_id)
+    }
+
+    /// A single oracle failure must return OracleFailure and leave the market Active.
+    #[test]
+    fn test_oracle_failure_leaves_market_active() {
+        let e = Env::default();
+        let (client, market_id) = setup_contract_with_bad_oracle(&e);
+
+        e.ledger().set_timestamp(2000); // at resolution deadline
+
+        let result = client.try_attempt_oracle_resolution(&market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::OracleFailure)));
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Active);
+        assert!(market.winning_outcome.is_none());
+        assert!(market.pending_resolution_timestamp.is_none());
+    }
+
+    /// Repeated oracle failures must never mutate market state — status stays
+    /// Active and no partial oracle storage is written on any iteration.
+    #[test]
+    fn test_repeated_oracle_failures_no_partial_state() {
+        let e = Env::default();
+        let (client, market_id) = setup_contract_with_bad_oracle(&e);
+
+        e.ledger().set_timestamp(2000);
+
+        for _ in 0..5 {
+            let result = client.try_attempt_oracle_resolution(&market_id);
+            assert_eq!(result, Err(Ok(crate::errors::ErrorCode::OracleFailure)));
+        }
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Active,
+            "market must remain Active after repeated oracle failures");
+        assert!(market.winning_outcome.is_none(),
+            "winning_outcome must not be set after oracle failures");
+        assert!(market.pending_resolution_timestamp.is_none(),
+            "pending_resolution_timestamp must not be set after oracle failures");
+
+        // Oracle storage keys must also be absent.
+        assert!(client.get_oracle_result(&market_id, &0).is_none(),
+            "oracle result key must not exist after failed attempts");
+        assert!(client.get_oracle_last_update(&market_id, &0).is_none(),
+            "oracle last_update key must not exist after failed attempts");
+    }
+
+    /// After N failures the market must still accept a successful resolution
+    /// once a valid oracle result is injected — verifying retry cadence works.
+    #[test]
+    fn test_oracle_retry_succeeds_after_failures() {
+        let e = Env::default();
+        e.mock_all_auths();
+
+        let contract_id = e.register(PredictIQ, ());
+        let client = PredictIQClient::new(&e, &contract_id);
+        let admin = Address::generate(&e);
+        client.initialize(&admin, &100);
+
+        // Start with a bad oracle config so the first attempts fail.
+        let bad_config = OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "not_hex"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+        let token = Address::generate(&e);
+        let options = Vec::from_array(&e, [
+            soroban_sdk::String::from_str(&e, "Yes"),
+            soroban_sdk::String::from_str(&e, "No"),
+        ]);
+        let market_id = client.create_market(
+            &admin,
+            &soroban_sdk::String::from_str(&e, "Retry market"),
+            &options,
+            &1000,
+            &2000,
+            &bad_config,
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        );
+
+        e.ledger().set_timestamp(2000);
+
+        // Three failures.
+        for _ in 0..3 {
+            assert!(client.try_attempt_oracle_resolution(&market_id).is_err());
+        }
+
+        // Inject a valid result via the admin shortcut (simulates oracle feed recovery).
+        client.set_oracle_result(&market_id, &0, &0);
+        // Now resolve_market (admin path) must succeed — market was never corrupted.
+        client.resolve_market(&market_id, &0);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(0));
+    }
+
+    /// A stale price (publish_time too old) must return StalePrice and leave
+    /// no oracle storage written — validate_price fires before any set().
+    #[test]
+    fn test_stale_oracle_price_leaves_no_partial_storage() {
+        let e = Env::default();
+        e.mock_all_auths();
+
+        // Register the mock Pyth contract — it returns publish_time=1_700_000_000
+        // which is far in the past relative to the ledger timestamp we'll set.
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: valid_feed_id(&e),
+            min_responses: 1,
+            max_staleness_seconds: 60, // only 60s tolerance
+            max_confidence_bps: 500,
+        };
+
+        // Set ledger timestamp far ahead so publish_time=1_700_000_000 is stale.
+        e.ledger().set_timestamp(1_700_010_000); // 10_000s after publish_time
+
+        let result = crate::modules::oracles::resolve_with_pyth(&e, 1u64, 0u32, &config);
+        assert_eq!(result, Err(crate::errors::ErrorCode::StalePrice));
+
+        // No oracle storage must have been written.
+        assert!(crate::modules::oracles::get_oracle_result(&e, 1u64, 0u32).is_none(),
+            "oracle result must not be stored after stale price rejection");
+        assert!(crate::modules::oracles::get_last_update(&e, 1u64, 0u32).is_none(),
+            "oracle last_update must not be stored after stale price rejection");
+    }
 }
 
 // =============================================================================
