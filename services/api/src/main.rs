@@ -24,7 +24,7 @@ use db::Database;
 use email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler};
 use metrics::Metrics;
 use newsletter::IpRateLimiter;
-use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
+use security::{ApiKeyAuth, IpWhitelist, RateLimiter, TrustProxy};
 use tokio::net::TcpListener;
 use tower_http::{
     compression::CompressionLayer,
@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(RateLimiter::new());
     let api_key_auth = Arc::new(ApiKeyAuth::new(config.api_keys.clone()));
     let ip_whitelist = Arc::new(IpWhitelist::new(config.admin_whitelist_ips.clone()));
+    let trust_proxy = TrustProxy(config.trust_proxy);
 
     // Start rate limiter cleanup task
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -143,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/markets/featured", get(handlers::featured_markets))
         .route("/api/content", get(handlers::content))
         .layer(middleware::from_fn_with_state(
-            rate_limiter.clone(),
+            (rate_limiter.clone(), trust_proxy),
             security::global_rate_limit_middleware,
         ))
         .with_state(state.clone());
@@ -171,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::delete(handlers::newsletter_gdpr_delete),
         )
         .layer(middleware::from_fn_with_state(
-            rate_limiter.clone(),
+            (rate_limiter.clone(), trust_proxy),
             rate_limit::newsletter_rate_limit_middleware,
         ))
         .with_state(state.clone());
