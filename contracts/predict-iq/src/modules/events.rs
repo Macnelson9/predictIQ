@@ -239,18 +239,3 @@ pub fn emit_creation_deposit_set(e: &Env, old_amount: i128, new_amount: i128) {
         (old_amount, new_amount),
     );
 }
-
-/// Emit MonitoringStateReset event
-/// Topics: [mon_reset]
-/// Data: (resetter, previous_error_count, previous_last_observation)
-pub fn emit_monitoring_state_reset(
-    e: &Env,
-    resetter: Address,
-    previous_error_count: u32,
-    previous_last_observation: u64,
-) {
-    e.events().publish(
-        (symbol_short!("mon_reset"), resetter),
-        (previous_error_count, previous_last_observation),
-    );
-}

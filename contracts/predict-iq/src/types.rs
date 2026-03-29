@@ -198,20 +198,3 @@ pub const GOV_TTL_HIGH_THRESHOLD: u32 = 3_110_400; // ~180 days
 
 /// Issue #54: Reserved sentinel index for cancellation votes, distinct from any valid outcome index.
 pub const CANCEL_OUTCOME_INDEX: u32 = u32::MAX;
-
-/// Issue #33: Named struct for upgrade vote statistics.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeStats {
-    pub votes_for: u32,
-    pub votes_against: u32,
-}
-
-/// Pending guardian removal proposal.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingGuardianRemoval {
-    pub target_guardian: Address,
-    pub initiated_at: u64,
-    pub votes_for: soroban_sdk::Vec<Address>,
-}
