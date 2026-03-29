@@ -267,17 +267,30 @@ pub async fn api_key_middleware(
     headers: HeaderMap,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let api_key = headers
         .get("x-api-key")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
 
     if !auth.verify(api_key) {
-        return Err(StatusCode::UNAUTHORIZED);
+        #[derive(Serialize)]
+        struct ErrorBody {
+            error: &'static str,
+        }
+        let mut resp = (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody { error: "invalid or missing API key" }),
+        )
+            .into_response();
+        resp.headers_mut().insert(
+            "WWW-Authenticate",
+            HeaderValue::from_static("ApiKey realm=\"predictiq\""),
+        );
+        return resp;
     }
 
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 /// IP whitelist for admin endpoints
