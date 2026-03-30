@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::ValidateEmail;
 
-use crate::{cache::keys, email::webhook::sendgrid_webhook_handler, AppState};
+use crate::{blockchain::HealthStatus, cache::keys, email::webhook::sendgrid_webhook_handler, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct ApiError {
@@ -610,7 +610,11 @@ pub async fn blockchain_health(
         .health_check_cached()
         .await
         .map_err(into_api_error)?;
-    Ok((StatusCode::OK, Json(data)))
+    let status_code = match data.status {
+        HealthStatus::Healthy => StatusCode::OK,
+        HealthStatus::Degraded | HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Ok((status_code, Json(data)))
 }
 
 pub async fn blockchain_market_data(

@@ -125,11 +125,24 @@ pub struct TransactionStatus {
     pub data_source: DataSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// Node reachable and contract readable.
+    Healthy,
+    /// Node reachable but contract read failed.
+    Degraded,
+    /// Node unreachable.
+    Unhealthy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockchainHealth {
     pub network: String,
     pub rpc_url: String,
     pub latest_ledger: u32,
+    pub status: HealthStatus,
+    /// Kept for backwards compatibility; true only when status == Healthy.
     pub is_healthy: bool,
     pub contract_reachable: bool,
     pub checked_at_unix: u64,
@@ -653,11 +666,18 @@ impl BlockchainClient {
                     .as_secs();
 
                 // Health is always a live probe; no fallback substitution needed.
+                let status = match (latest > 0, contract_reachable) {
+                    (true, true) => HealthStatus::Healthy,
+                    (true, false) => HealthStatus::Degraded,
+                    _ => HealthStatus::Unhealthy,
+                };
+
                 Ok(BlockchainHealth {
                     network: self.network.clone(),
                     rpc_url: self.rpc_url.clone(),
                     latest_ledger: latest,
-                    is_healthy: latest > 0,
+                    status,
+                    is_healthy: status == HealthStatus::Healthy,
                     contract_reachable,
                     checked_at_unix,
                     data_source: DataSource::Live,
@@ -1855,3 +1875,68 @@ mod tests {
         assert_eq!(client.key_schema.user_bets_key("GTEST"), "user_bets:GTEST");
         assert_eq!(client.key_schema.platform_stats, "platform:stats");
     }
+
+    // -------------------------------------------------------------------------
+    // BlockchainHealth – status reflects both node and contract health
+    // -------------------------------------------------------------------------
+
+    fn make_health(latest: u32, contract_reachable: bool) -> BlockchainHealth {
+        let status = match (latest > 0, contract_reachable) {
+            (true, true) => HealthStatus::Healthy,
+            (true, false) => HealthStatus::Degraded,
+            _ => HealthStatus::Unhealthy,
+        };
+        BlockchainHealth {
+            network: "test".to_string(),
+            rpc_url: "http://localhost".to_string(),
+            latest_ledger: latest,
+            status,
+            is_healthy: status == HealthStatus::Healthy,
+            contract_reachable,
+            checked_at_unix: 0,
+            data_source: DataSource::Live,
+        }
+    }
+
+    #[test]
+    fn test_health_healthy_when_ledger_and_contract_ok() {
+        let h = make_health(100, true);
+        assert_eq!(h.status, HealthStatus::Healthy);
+        assert!(h.is_healthy);
+    }
+
+    #[test]
+    fn test_health_degraded_when_ledger_ok_but_contract_fails() {
+        let h = make_health(100, false);
+        assert_eq!(h.status, HealthStatus::Degraded);
+        assert!(!h.is_healthy);
+    }
+
+    #[test]
+    fn test_health_unhealthy_when_ledger_zero() {
+        let h = make_health(0, false);
+        assert_eq!(h.status, HealthStatus::Unhealthy);
+        assert!(!h.is_healthy);
+    }
+
+    #[test]
+    fn test_health_unhealthy_when_ledger_zero_even_if_contract_reachable() {
+        // ledger=0 means node is unreachable; contract_reachable is irrelevant.
+        let h = make_health(0, true);
+        assert_eq!(h.status, HealthStatus::Unhealthy);
+        assert!(!h.is_healthy);
+    }
+
+    #[test]
+    fn test_health_is_healthy_compat_field_matches_status() {
+        for (ledger, contract, expected_healthy) in [(100, true, true), (100, false, false), (0, false, false)] {
+            let h = make_health(ledger, contract);
+            assert_eq!(
+                h.is_healthy,
+                h.status == HealthStatus::Healthy,
+                "is_healthy must mirror status==Healthy for ledger={ledger} contract={contract}"
+            );
+            assert_eq!(h.is_healthy, expected_healthy);
+        }
+    }
+}
