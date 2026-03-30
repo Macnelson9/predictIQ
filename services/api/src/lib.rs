@@ -29,7 +29,7 @@ use db::Database;
 use email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler};
 use metrics::Metrics;
 use newsletter::IpRateLimiter;
-use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
+use security::{ApiKeyAuth, IpWhitelist, RateLimiter, TrustProxy};
 use shutdown::ShutdownCoordinator;
 use tokio::net::TcpListener;
 use tower_http::{
@@ -247,7 +247,8 @@ pub async fn run() -> anyhow::Result<()> {
         .merge(newsletter_routes)
         .merge(admin_routes)
         .merge(webhook_routes)
-        .layer(cors);
+        .layer(cors)
+        .layer(middleware::from_fn(security::security_headers_middleware));
 
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!("API listening on {bind_addr}");
