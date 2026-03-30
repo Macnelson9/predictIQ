@@ -8,6 +8,7 @@ mod metrics;
 mod newsletter;
 mod rate_limit;
 mod security;
+mod shutdown;
 mod validation;
 
 #[cfg(test)]

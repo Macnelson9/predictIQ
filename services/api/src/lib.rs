@@ -8,9 +8,14 @@ mod metrics;
 mod newsletter;
 mod rate_limit;
 pub mod security;
+mod shutdown;
 mod validation;
 
+#[cfg(test)]
+mod shutdown_tests;
+
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     middleware,
@@ -25,6 +30,7 @@ use email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler};
 use metrics::Metrics;
 use newsletter::IpRateLimiter;
 use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
+use shutdown::ShutdownCoordinator;
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -69,12 +75,28 @@ pub async fn run() -> anyhow::Result<()> {
     let _api_key_auth = Arc::new(ApiKeyAuth::new(config.api_keys.clone()));
     let _ip_whitelist = Arc::new(IpWhitelist::new(config.admin_whitelist_ips.clone()));
 
+    // Setup shutdown coordination for 3 workers: rate limiter cleanup, blockchain (2), email queue
+    let shutdown_coordinator = ShutdownCoordinator::new(4);
+    
+    // Start rate limiter cleanup task
     let rate_limiter_cleanup = rate_limiter.clone();
-    tokio::spawn(async move {
+    let mut cleanup_shutdown_rx = shutdown_coordinator.subscribe();
+    let cleanup_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+        
         loop {
-            interval.tick().await;
-            rate_limiter_cleanup.cleanup().await;
+            tokio::select! {
+                _ = cleanup_shutdown_rx.recv() => {
+                    tracing::info!("Rate limiter cleanup worker received shutdown signal");
+                    // Perform final cleanup
+                    rate_limiter_cleanup.cleanup().await;
+                    tracing::info!("Rate limiter cleanup worker shutdown complete");
+                    break;
+                }
+                _ = interval.tick() => {
+                    rate_limiter_cleanup.cleanup().await;
+                }
+            }
         }
     });
 
@@ -90,13 +112,32 @@ pub async fn run() -> anyhow::Result<()> {
         webhook_handler: webhook_handler.clone(),
     });
 
-    Arc::new(state.blockchain.clone()).start_background_tasks();
+    // Start blockchain background tasks
+    let blockchain_handles = Arc::new(state.blockchain.clone())
+        .start_background_tasks(&shutdown_coordinator);
 
+    // Start email queue worker
     let queue_worker = email_queue.clone();
     let service_worker = email_service.clone();
-    tokio::spawn(async move {
-        queue_worker.start_worker(service_worker).await;
+    let email_shutdown_rx = shutdown_coordinator.subscribe();
+    let email_handle = tokio::spawn(async move {
+        queue_worker.start_worker(service_worker, email_shutdown_rx).await;
     });
+
+    // Collect all worker handles
+    let mut worker_handles = vec![
+        shutdown::WorkerHandle::new(
+            "rate-limiter-cleanup".to_string(),
+            cleanup_handle,
+            shutdown_coordinator.clone(),
+        ),
+        shutdown::WorkerHandle::new(
+            "email-queue".to_string(),
+            email_handle,
+            shutdown_coordinator.clone(),
+        ),
+    ];
+    worker_handles.extend(blockchain_handles);
 
     if let Err(err) = handlers::warm_critical_caches(state.clone()).await {
         tracing::warn!("cache warming skipped: {err}");
@@ -204,7 +245,43 @@ pub async fn run() -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!("API listening on {bind_addr}");
-    axum::serve(listener, app).await?;
 
+    // Setup graceful shutdown
+    let shutdown_coordinator_clone = shutdown_coordinator.clone();
+    tokio::spawn(async move {
+        if let Err(e) = shutdown::setup_signal_handlers().await {
+            tracing::error!("Failed to setup signal handlers: {}", e);
+            return;
+        }
+        
+        // Initiate graceful shutdown with 30 second timeout
+        if let Err(e) = shutdown_coordinator_clone.shutdown(Duration::from_secs(30)).await {
+            tracing::error!("Graceful shutdown failed: {}", e);
+        }
+    });
+
+    // Start the HTTP server with graceful shutdown
+    let server = axum::serve(listener, app);
+    let mut server_shutdown_rx = shutdown_coordinator.subscribe();
+    
+    tokio::select! {
+        result = server => {
+            if let Err(e) = result {
+                tracing::error!("Server error: {}", e);
+            }
+        }
+        _ = server_shutdown_rx.recv() => {
+            tracing::info!("HTTP server received shutdown signal");
+        }
+    }
+
+    // Wait for all workers to complete
+    for handle in worker_handles {
+        if let Err(e) = handle.join().await {
+            tracing::error!("Worker join error: {:?}", e);
+        }
+    }
+
+    tracing::info!("Application shutdown complete");
     Ok(())
 }

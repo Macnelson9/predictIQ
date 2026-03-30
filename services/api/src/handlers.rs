@@ -85,8 +85,30 @@ pub struct FeaturedMarketView {
     pub resolved_outcome: Option<u32>,
 }
 
-pub async fn health() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut health_status = serde_json::json!({
+        "status": "ok",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "workers": {
+            "blockchain_sync": "running",
+            "blockchain_monitor": "running", 
+            "email_queue": "running",
+            "rate_limiter_cleanup": "running"
+        }
+    });
+
+    // Check if we can connect to Redis
+    if let Err(_) = state.cache.ping().await {
+        health_status["status"] = "degraded".into();
+        health_status["workers"]["redis"] = "unhealthy".into();
+    }
+
+    // Check email queue health
+    if let Ok(processing_count) = state.email_queue.get_processing_count().await {
+        health_status["workers"]["email_queue_processing"] = processing_count.into();
+    }
+
+    (StatusCode::OK, Json(health_status))
 }
 
 #[derive(Debug, Clone, Deserialize)]

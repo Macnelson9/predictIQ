@@ -686,7 +686,10 @@ impl BlockchainClient {
         Ok(confirmed_tip)
     }
 
-    pub async fn run_sync_worker(self: Arc<Self>) {
+    pub async fn run_sync_worker(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
         let cursor_key = keys::chain_sync_cursor(&self.network);
         let mut cursor = self
             .cache
@@ -696,42 +699,80 @@ impl BlockchainClient {
             .flatten()
             .unwrap_or(0);
 
+        tracing::info!("Starting blockchain sync worker");
+
         loop {
-            match self.sync_once(cursor).await {
-                Ok(next_cursor) => {
-                    cursor = next_cursor;
-                    let _ = self
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Blockchain sync worker received shutdown signal");
+                    
+                    // Save current cursor before shutdown
+                    if let Err(e) = self
                         .cache
                         .set_json(&cursor_key, &cursor, Duration::from_secs(24 * 60 * 60))
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("Failed to save sync cursor on shutdown: {}", e);
+                    }
+                    
+                    tracing::info!("Blockchain sync worker shutdown complete");
+                    break;
                 }
-                Err(err) => tracing::warn!("sync loop error: {err}"),
-            }
-
-            sleep(self.event_poll_interval).await;
-        }
-    }
-
-    pub async fn run_transaction_monitor(self: Arc<Self>) {
-        loop {
-            let hashes: Vec<String> = self
-                .monitor
-                .watched_txs
-                .read()
-                .await
-                .iter()
-                .cloned()
-                .collect();
-
-            for hash in hashes {
-                if let Ok(status) = self.transaction_status_cached(&hash).await {
-                    if status.status != "NOT_FOUND" && status.status != "PENDING" {
-                        self.monitor.watched_txs.write().await.remove(&hash);
+                _ = sleep(self.event_poll_interval) => {
+                    match self.sync_once(cursor).await {
+                        Ok(next_cursor) => {
+                            cursor = next_cursor;
+                            let _ = self
+                                .cache
+                                .set_json(&cursor_key, &cursor, Duration::from_secs(24 * 60 * 60))
+                                .await;
+                        }
+                        Err(err) => tracing::warn!("sync loop error: {err}"),
                     }
                 }
             }
+        }
+    }
 
-            sleep(self.tx_poll_interval).await;
+    pub async fn run_transaction_monitor(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        tracing::info!("Starting blockchain transaction monitor");
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Blockchain transaction monitor received shutdown signal");
+                    
+                    // Log remaining watched transactions
+                    let watched_count = self.monitor.watched_txs.read().await.len();
+                    if watched_count > 0 {
+                        tracing::info!("Shutdown with {} transactions still being watched", watched_count);
+                    }
+                    
+                    tracing::info!("Blockchain transaction monitor shutdown complete");
+                    break;
+                }
+                _ = sleep(self.tx_poll_interval) => {
+                    let hashes: Vec<String> = self
+                        .monitor
+                        .watched_txs
+                        .read()
+                        .await
+                        .iter()
+                        .cloned()
+                        .collect();
+
+                    for hash in hashes {
+                        if let Ok(status) = self.transaction_status_cached(&hash).await {
+                            if status.status != "NOT_FOUND" && status.status != "PENDING" {
+                                self.monitor.watched_txs.write().await.remove(&hash);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -743,21 +784,44 @@ impl BlockchainClient {
             .insert(hash.to_string());
     }
 
-    pub fn start_background_tasks(self: Arc<Self>) {
+    pub fn start_background_tasks(
+        self: Arc<Self>,
+        shutdown_coordinator: &crate::shutdown::ShutdownCoordinator,
+    ) -> Vec<crate::shutdown::WorkerHandle> {
         if self.monitor.tasks_started.swap(true, Ordering::SeqCst) {
             tracing::warn!("background tasks already started; skipping duplicate invocation");
-            return;
+            return vec![];
         }
 
-        let sync_client = self.clone();
-        tokio::spawn(async move {
-            sync_client.run_sync_worker().await;
-        });
+        let mut handles = Vec::new();
 
-        let monitor_client = self;
-        tokio::spawn(async move {
-            monitor_client.run_transaction_monitor().await;
+        // Start sync worker
+        let sync_client = self.clone();
+        let sync_shutdown_rx = shutdown_coordinator.subscribe();
+        let sync_handle = tokio::spawn(async move {
+            sync_client.run_sync_worker(sync_shutdown_rx).await;
         });
+        
+        handles.push(crate::shutdown::WorkerHandle::new(
+            "blockchain-sync".to_string(),
+            sync_handle,
+            shutdown_coordinator.clone(),
+        ));
+
+        // Start transaction monitor
+        let monitor_client = self;
+        let monitor_shutdown_rx = shutdown_coordinator.subscribe();
+        let monitor_handle = tokio::spawn(async move {
+            monitor_client.run_transaction_monitor(monitor_shutdown_rx).await;
+        });
+        
+        handles.push(crate::shutdown::WorkerHandle::new(
+            "blockchain-monitor".to_string(),
+            monitor_handle,
+            shutdown_coordinator.clone(),
+        ));
+
+        handles
     }
 }
 

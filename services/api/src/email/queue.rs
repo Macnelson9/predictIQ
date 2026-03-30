@@ -185,6 +185,16 @@ impl EmailQueue {
         Ok(())
     }
 
+    /// Get count of jobs currently in processing state
+    pub async fn get_processing_count(&self) -> Result<usize> {
+        let mut conn = self.cache.manager.clone();
+        let count: usize = conn
+            .scard(EMAIL_PROCESSING_KEY)
+            .await
+            .context("Failed to get processing count")?;
+        Ok(count)
+    }
+
     /// Process retry queue - move jobs back to main queue if retry time has passed
     pub async fn process_retries(&self) -> Result<usize> {
         let mut conn = self.cache.manager.clone();
@@ -284,7 +294,11 @@ impl EmailQueue {
     }
 
     /// Background worker to process email queue
-    pub async fn start_worker(&self, service: crate::email::EmailService) {
+    pub async fn start_worker(
+        &self,
+        service: crate::email::EmailService,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
         tracing::info!("Starting email queue worker");
 
         if let Err(e) = self.recover_stale_processing_jobs().await {
@@ -292,27 +306,49 @@ impl EmailQueue {
         }
 
         loop {
-            // Process retries first
-            if let Err(e) = self.process_retries().await {
-                tracing::error!("Error processing retries: {}", e);
-            }
-
-            // Process next job
-            match self.dequeue().await {
-                Ok(Some(job_id)) => {
-                    if let Err(e) = self.process_job(job_id, &service).await {
-                        tracing::error!("Error processing job {}: {}", job_id, e);
-                        let _ = self.mark_failed(job_id, &e.to_string()).await;
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Email queue worker received shutdown signal");
+                    
+                    // Process any remaining retries before shutdown
+                    if let Err(e) = self.process_retries().await {
+                        tracing::warn!("Error processing final retries on shutdown: {}", e);
                     }
+                    
+                    // Check for any jobs still in processing state
+                    if let Ok(processing_count) = self.get_processing_count().await {
+                        if processing_count > 0 {
+                            tracing::warn!("Shutdown with {} jobs still in processing state", processing_count);
+                        }
+                    }
+                    
+                    tracing::info!("Email queue worker shutdown complete");
+                    break;
                 }
-                Ok(None) => {
-                    // No jobs available, sleep briefly
-                    sleep(Duration::from_secs(1)).await;
-                }
-                Err(e) => {
-                    tracing::error!("Error dequeuing job: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                }
+                _ = async {
+                    // Process retries first
+                    if let Err(e) = self.process_retries().await {
+                        tracing::error!("Error processing retries: {}", e);
+                    }
+
+                    // Process next job
+                    match self.dequeue().await {
+                        Ok(Some(job_id)) => {
+                            if let Err(e) = self.process_job(job_id, &service).await {
+                                tracing::error!("Error processing job {}: {}", job_id, e);
+                                let _ = self.mark_failed(job_id, &e.to_string()).await;
+                            }
+                        }
+                        Ok(None) => {
+                            // No jobs available, sleep briefly
+                            sleep(Duration::from_secs(1)).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Error dequeuing job: {}", e);
+                            sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                } => {}
             }
         }
     }
