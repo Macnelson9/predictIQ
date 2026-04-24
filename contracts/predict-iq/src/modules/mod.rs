@@ -9,6 +9,7 @@ pub mod events;
 pub mod fees;
 pub mod governance;
 pub mod markets;
+pub mod migration;
 pub mod monitoring;
 pub mod oracles;
 pub mod resolution;

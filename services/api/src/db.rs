@@ -58,6 +58,7 @@ pub struct NewsletterSubscriber {
     pub created_at: DateTime<Utc>,
     pub confirmed_at: Option<DateTime<Utc>>,
     pub unsubscribed_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl Database {
@@ -237,9 +238,9 @@ impl Database {
         normalized_email: &str,
     ) -> anyhow::Result<Option<NewsletterSubscriber>> {
         let row = sqlx::query(
-            "SELECT email, source, confirmed, confirmation_token, created_at, confirmed_at, unsubscribed_at
+            "SELECT email, source, confirmed, confirmation_token, created_at, confirmed_at, unsubscribed_at, deleted_at
              FROM newsletter_subscribers
-             WHERE email = $1",
+             WHERE email = $1 AND deleted_at IS NULL",
         )
         .bind(normalized_email)
         .fetch_optional(&self.pool)
@@ -254,6 +255,7 @@ impl Database {
                 created_at: row.try_get::<DateTime<Utc>, _>("created_at")?,
                 confirmed_at: row.try_get::<Option<DateTime<Utc>>, _>("confirmed_at")?,
                 unsubscribed_at: row.try_get::<Option<DateTime<Utc>>, _>("unsubscribed_at")?,
+                deleted_at: row.try_get::<Option<DateTime<Utc>>, _>("deleted_at")?,
             }));
         }
 
@@ -303,7 +305,20 @@ impl Database {
         let result = sqlx::query(
             "UPDATE newsletter_subscribers
              SET unsubscribed_at = NOW(), confirmed = FALSE
-             WHERE email = $1",
+             WHERE email = $1 AND deleted_at IS NULL",
+        )
+        .bind(normalized_email)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn newsletter_soft_delete(&self, normalized_email: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE newsletter_subscribers
+             SET deleted_at = NOW()
+             WHERE email = $1 AND deleted_at IS NULL",
         )
         .bind(normalized_email)
         .execute(&self.pool)
