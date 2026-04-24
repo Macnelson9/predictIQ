@@ -88,7 +88,6 @@ impl WebhookHandler {
                 message_id,
                 event_type,
                 email,
-                timestamp,
                 serde_json::to_value(&event)?,
             )
             .await?;

@@ -50,4 +50,6 @@ pub enum ErrorCode {
     UpgradeAlreadyPending = 143,
     UpgradeHashInCooldown = 144,
     InvalidAmount = 145,
+    GovernanceTokenNotSet = 146,
+    MarketNotResolved = 147,
 }

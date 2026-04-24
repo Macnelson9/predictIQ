@@ -33,6 +33,7 @@ pub struct Market {
     pub outcome_stakes: Map<u32, i128>, // Stake per outcome
     pub pending_resolution_timestamp: Option<u64>, // Timestamp when resolution was initiated
     pub dispute_snapshot_ledger: Option<u32>, // Ledger sequence for snapshot voting
+    pub dispute_timestamp: Option<u64>, // Timestamp when dispute was filed
 }
 
 #[contracttype]
@@ -116,6 +117,8 @@ pub enum ConfigKey {
     TimelockDuration,
     PendingGuardianRemoval,
     UpgradeRejectedAt(soroban_sdk::BytesN<32>),
+    GovernanceToken,
+    MaxPushPayoutWinners,
 }
 
 #[contracttype]

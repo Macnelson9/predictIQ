@@ -36,13 +36,13 @@ pub fn init_tracing(
     };
 
     // Build tracer provider
-    let tracer_provider = if let Some(endpoint) = otlp_endpoint {
+    let tracer_provider = if let Some(ref endpoint) = otlp_endpoint {
         // Export to OTLP collector (Jaeger, Zipkin, etc.)
         let exporter = opentelemetry_otlp::new_exporter()
             .tonic()
             .with_endpoint(endpoint);
 
-        let tracer = opentelemetry_otlp::new_pipeline()
+        opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(exporter)
             .with_trace_config(
@@ -51,9 +51,19 @@ pub fn init_tracing(
                     .with_id_generator(RandomIdGenerator::default())
                     .with_resource(resource),
             )
-            .install_batch(runtime::Tokio)?;
-
-        tracer
+            .install_batch(runtime::Tokio)
+            .map(|_tracer| {
+                // install_batch already sets the global provider; build a local one too
+                TracerProvider::builder()
+                    .with_config(
+                        opentelemetry_sdk::trace::Config::default()
+                            .with_sampler(Sampler::AlwaysOn),
+                    )
+                    .build()
+            })
+            .unwrap_or_else(|_| {
+                TracerProvider::builder().build()
+            })
     } else {
         // No exporter configured - use noop
         TracerProvider::builder()
@@ -71,7 +81,7 @@ pub fn init_tracing(
 
     // Create tracing layer
     let telemetry_layer = tracing_opentelemetry::layer()
-        .with_tracer(tracer_provider.tracer(service_name));
+        .with_tracer(tracer_provider.tracer(service_name.to_string()));
 
     // Initialize tracing subscriber with OpenTelemetry layer
     tracing_subscriber::registry()

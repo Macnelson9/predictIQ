@@ -99,6 +99,8 @@ pub fn cast_vote(
     }
 
     let vote = Vote {
+        market_id,
+        voter: voter.clone(),
         outcome,
         weight: actual_weight,
     };

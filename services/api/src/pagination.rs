@@ -19,6 +19,12 @@ pub struct PaginatedResponse<T> {
     pub pagination: PaginationMeta,
 }
 
+impl Default for PaginationQuery {
+    fn default() -> Self {
+        Self { cursor: None, limit: None }
+    }
+}
+
 impl PaginationQuery {
     pub fn limit(&self) -> i64 {
         self.limit

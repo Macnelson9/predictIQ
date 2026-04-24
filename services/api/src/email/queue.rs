@@ -257,6 +257,16 @@ impl EmailQueue {
         Ok(count)
     }
 
+    /// Get the number of jobs currently being processed.
+    pub async fn get_processing_count(&self) -> Result<usize> {
+        let mut conn = self.cache.manager.clone();
+        let count: usize = conn
+            .scard(EMAIL_PROCESSING_KEY)
+            .await
+            .context("Failed to get processing count")?;
+        Ok(count)
+    }
+
     /// Background worker to process email queue
     pub async fn start_worker(&self, service: crate::email::EmailService) {
         tracing::info!("Starting email queue worker");

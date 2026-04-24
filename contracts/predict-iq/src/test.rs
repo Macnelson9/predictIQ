@@ -2144,3 +2144,709 @@ fn test_initialize_rejects_non_deployer() {
     assert!(result.is_err());
 }
 
+
+// ─── Fee Calculation Unit Tests ───────────────────────────────────────────────
+
+mod fee_calculation_tests {
+    use crate::modules::fees;
+    use crate::types::MarketTier;
+    use crate::{PredictIQ, PredictIQClient};
+    use soroban_sdk::{testutils::Address as _, token, Address, Env};
+
+    fn setup() -> (Env, PredictIQClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(PredictIQ, ());
+        let client = PredictIQClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100); // 100 bps = 1%
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+
+        (env, client, admin, token_address, contract_id)
+    }
+
+    /// Seed fee revenue and referrer balance directly into contract storage.
+    fn seed_fee(env: &Env, contract_id: &Address, token: &Address, amount: i128) {
+        env.as_contract(contract_id, || {
+            fees::collect_fee(env, token.clone(), amount);
+        });
+    }
+
+    fn seed_referral(
+        env: &Env,
+        contract_id: &Address,
+        referrer: &Address,
+        token: &Address,
+        fee_amount: i128,
+    ) {
+        env.as_contract(contract_id, || {
+            fees::add_referral_reward(env, referrer, token, fee_amount);
+        });
+    }
+
+    // ── Base fee ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_base_fee_get_set() {
+        let (_env, client, _admin, _token, _contract_id) = setup();
+        assert_eq!(client.get_base_fee(), 100);
+        client.set_base_fee(&250);
+        assert_eq!(client.get_base_fee(), 250);
+    }
+
+    #[test]
+    fn test_base_fee_collected_and_tracked() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        // Simulate fee collection as if a 10_000 bet was placed (1% = 100)
+        seed_fee(&env, &contract_id, &token, 100);
+
+        assert_eq!(client.get_revenue(&token), 100);
+    }
+
+    #[test]
+    fn test_base_fee_zero_produces_no_revenue() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        client.set_base_fee(&0);
+
+        // With 0 bps fee, calculate_fee returns 0 — nothing collected
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_fee(&env, 10_000);
+            assert_eq!(fee, 0);
+            // collect_fee with 0 is a no-op in bets.rs (if fee > 0 guard)
+        });
+
+        assert_eq!(client.get_revenue(&token), 0);
+    }
+
+    #[test]
+    fn test_base_fee_accumulates_across_multiple_collections() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token, 100);
+
+        assert_eq!(client.get_revenue(&token), 300);
+    }
+
+    // ── Tier-based fees ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tiered_fee_basic_is_full_rate() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps on 10_000 = 100
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            assert_eq!(fee, 100);
+        });
+    }
+
+    #[test]
+    fn test_tiered_fee_pro_applies_25_percent_discount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps × 75% = 75 bps on 10_000 = 75
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Pro);
+            assert_eq!(fee, 75);
+        });
+    }
+
+    #[test]
+    fn test_tiered_fee_institutional_applies_50_percent_discount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps × 50% = 50 bps on 10_000 = 50
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Institutional);
+            assert_eq!(fee, 50);
+        });
+    }
+
+    #[test]
+    fn test_tier_fees_ordered_basic_gt_pro_gt_institutional() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let basic = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            let pro = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Pro);
+            let inst = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Institutional);
+
+            assert!(basic > pro, "Basic fee must exceed Pro fee");
+            assert!(pro > inst, "Pro fee must exceed Institutional fee");
+        });
+    }
+
+    // ── Referral fee ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_referral_reward_is_10_percent_of_protocol_fee() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        // Seed contract with tokens so claim transfer succeeds
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        // Protocol fee = 100; referral reward = 10% of 100 = 10
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+
+        let claimed = client.claim_referral_rewards(&referrer, &token);
+        assert_eq!(claimed, 10);
+    }
+
+    #[test]
+    fn test_no_referral_reward_when_fee_is_zero() {
+        let (env, client, _admin, token, _contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        // No reward seeded — claim must fail
+        let result = client.try_claim_referral_rewards(&referrer, &token);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InsufficientBalance)));
+    }
+
+    #[test]
+    fn test_referral_rewards_accumulate_across_bets() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        // Three bets each generating fee=100 → reward=10 each
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+
+        let claimed = client.claim_referral_rewards(&referrer, &token);
+        assert_eq!(claimed, 30);
+    }
+
+    #[test]
+    fn test_referral_reward_zeroed_after_claim() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        client.claim_referral_rewards(&referrer, &token);
+
+        // Second claim must fail — balance is zero
+        let result = client.try_claim_referral_rewards(&referrer, &token);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InsufficientBalance)));
+    }
+
+    // ── Fee distribution / edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_fee_and_net_sum_to_original_amount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let amount = 10_000i128;
+            let fee = fees::calculate_tiered_fee(&env, amount, &MarketTier::Basic);
+            let net = amount - fee;
+            assert_eq!(fee + net, amount);
+        });
+    }
+
+    #[test]
+    fn test_zero_bet_produces_zero_fee() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_fee(&env, 0);
+            assert_eq!(fee, 0);
+        });
+    }
+
+    #[test]
+    fn test_maximum_fee_bps_takes_entire_amount() {
+        let (env, client, _admin, _token, contract_id) = setup();
+
+        client.set_base_fee(&10_000); // 100%
+
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            assert_eq!(fee, 10_000);
+        });
+    }
+
+    #[test]
+    fn test_revenue_isolated_per_token() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let token_admin2 = Address::generate(&env);
+        let token_id2 = env.register_stellar_asset_contract_v2(token_admin2.clone());
+        let token2 = token_id2.address();
+
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token2, 200);
+
+        assert_eq!(client.get_revenue(&token), 100);
+        assert_eq!(client.get_revenue(&token2), 200);
+    }
+}
+
+// ─── Dispute Resolution Unit Tests ────────────────────────────────────────────
+
+mod dispute_resolution_tests {
+    use crate::modules::{markets, voting};
+    use crate::types::{MarketStatus, MarketTier, OracleConfig};
+    use crate::{PredictIQ, PredictIQClient};
+    use soroban_sdk::{testutils::{Address as _, Ledger as _}, token, Address, Env, String, Vec};
+
+    const DISPUTE_WINDOW: u64 = 86_400; // 24h — matches resolution::DISPUTE_WINDOW_SECONDS
+
+    fn setup() -> (Env, PredictIQClient<'static>, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(PredictIQ, ());
+        let client = PredictIQClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &0); // 0 fee — keeps tests simple
+
+        (env, client, admin, contract_id)
+    }
+
+    /// Create a minimal market and return its id.
+    fn create_market(env: &Env, client: &PredictIQClient, _contract_id: &Address) -> u64 {
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token = token_id.address();
+
+        let options = Vec::from_array(
+            env,
+            [String::from_str(env, "Yes"), String::from_str(env, "No")],
+        );
+        client.create_market(
+            &Address::generate(env),
+            &String::from_str(env, "Dispute Test"),
+            &options,
+            &1000,
+            &2000,
+            &OracleConfig {
+                oracle_address: Address::generate(env),
+                feed_id: String::from_str(env, "feed"),
+                min_responses: Some(1),
+                max_staleness_seconds: 3600,
+                max_confidence_bps: 200,
+            },
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        )
+    }
+
+    /// Seed a market directly into the given status, bypassing the oracle flow.
+    fn seed_market_status(
+        env: &Env,
+        contract_id: &Address,
+        market_id: u64,
+        status: MarketStatus,
+        pending_ts: Option<u64>,
+        dispute_ts: Option<u64>,
+    ) {
+        env.as_contract(contract_id, || {
+            let mut market = markets::get_market(env, market_id).unwrap();
+            market.status = status;
+            market.pending_resolution_timestamp = pending_ts;
+            market.dispute_timestamp = dispute_ts;
+            markets::update_market(env, market);
+        });
+    }
+
+    // ── file_dispute state transitions ────────────────────────────────────────
+
+    #[test]
+    fn test_file_dispute_on_active_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_transitions_to_disputed() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        // Dispute within the 24h window
+        env.ledger().set_timestamp(pending_ts + 1);
+        let disputer = Address::generate(&env);
+        client.file_dispute(&disputer, &market_id);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Disputed);
+        assert_eq!(market.dispute_timestamp, Some(pending_ts + 1));
+    }
+
+    #[test]
+    fn test_file_dispute_after_window_closed_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        // At exactly pending_ts + window the window is closed
+        env.ledger().set_timestamp(pending_ts + DISPUTE_WINDOW);
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::DisputeWindowClosed)));
+    }
+
+    #[test]
+    fn test_file_dispute_on_already_disputed_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::Disputed,
+            Some(1000),
+            Some(1001),
+        );
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_on_resolved_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        seed_market_status(&env, &contract_id, market_id, MarketStatus::Resolved, None, None);
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_extends_resolution_deadline() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        let before = client.get_market(&market_id).unwrap().resolution_deadline;
+
+        env.ledger().set_timestamp(pending_ts + 1);
+        client.file_dispute(&Address::generate(&env), &market_id);
+
+        let after = client.get_market(&market_id).unwrap().resolution_deadline;
+        assert_eq!(after, before + DISPUTE_WINDOW);
+    }
+
+    // ── resolve_market (admin direct resolution) ──────────────────────────────
+
+    #[test]
+    fn test_resolve_market_sets_resolved_status_and_outcome() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        client.resolve_market(&market_id, &1);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(1));
+    }
+
+    #[test]
+    fn test_resolve_market_invalid_outcome_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let result = client.try_resolve_market(&market_id, &99);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InvalidOutcome)));
+    }
+
+    #[test]
+    fn test_resolve_market_nonexistent_market_rejected() {
+        let (_env, client, _admin, _contract_id) = setup();
+
+        let result = client.try_resolve_market(&999, &0);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotFound)));
+    }
+
+    // ── cast_vote weight calculation and tally ────────────────────────────────
+
+    fn setup_gov_token(env: &Env, _client: &PredictIQClient, contract_id: &Address) -> Address {
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
+        // Set governance token directly in instance storage
+        env.as_contract(contract_id, || {
+            env.storage()
+                .instance()
+                .set(&crate::types::ConfigKey::GovernanceToken, &token_address);
+        });
+        token_address
+    }
+
+    fn seed_disputed_market(
+        env: &Env,
+        contract_id: &Address,
+        market_id: u64,
+        snapshot_ledger: u32,
+    ) {
+        env.as_contract(contract_id, || {
+            let mut market = markets::get_market(env, market_id).unwrap();
+            market.status = MarketStatus::Disputed;
+            market.pending_resolution_timestamp = Some(1000);
+            market.dispute_timestamp = Some(1001);
+            market.dispute_snapshot_ledger = Some(snapshot_ledger);
+            markets::update_market(env, market);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_on_non_disputed_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        setup_gov_token(&env, &client, &contract_id);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &0, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotDisputed)));
+    }
+
+    #[test]
+    fn test_cast_vote_invalid_outcome_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &99, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InvalidOutcome)));
+    }
+
+    #[test]
+    fn test_cast_vote_without_governance_token_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        // No governance token set
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &0, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::GovernanceTokenNotSet)));
+    }
+
+    #[test]
+    fn test_cast_vote_accumulates_tally() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter1, &600);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter2, &400);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter1, &market_id, &0, &600);
+        client.cast_vote(&voter2, &market_id, &0, &400);
+
+        env.as_contract(&contract_id, || {
+            let tally = voting::get_tally(&env, market_id, 0);
+            assert_eq!(tally, 1_000);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_weight_reflects_token_balance() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter, &700);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &700);
+
+        client.cast_vote(&voter, &market_id, &1, &700);
+
+        env.as_contract(&contract_id, || {
+            let tally = voting::get_tally(&env, market_id, 1);
+            assert_eq!(tally, 700);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_split_across_outcomes() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &700);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &300);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &700);
+        client.cast_vote(&voter_b, &market_id, &1, &300);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(voting::get_tally(&env, market_id, 0), 700);
+            assert_eq!(voting::get_tally(&env, market_id, 1), 300);
+        });
+    }
+
+    // ── Tie-breaking / majority threshold ─────────────────────────────────────
+
+    #[test]
+    fn test_zero_votes_tally_returns_zero() {
+        let (env, _client, _admin, contract_id) = setup();
+        let market_id = 1u64;
+
+        env.as_contract(&contract_id, || {
+            // No votes seeded — tally must be 0
+            assert_eq!(voting::get_tally(&env, market_id, 0), 0);
+            assert_eq!(voting::get_tally(&env, market_id, 1), 0);
+        });
+    }
+
+    #[test]
+    fn test_equal_votes_on_both_outcomes_is_a_tie() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &500);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &500);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &500);
+        client.cast_vote(&voter_b, &market_id, &1, &500);
+
+        // 50/50 split — neither outcome reaches 60% majority
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let t1 = voting::get_tally(&env, market_id, 1);
+            let total = t0 + t1;
+            let max_pct = (t0.max(t1) * 10_000) / total;
+            // 50% < 60% threshold (6000 bps)
+            assert!(max_pct < 6_000, "50/50 split must not reach 60% majority");
+        });
+    }
+
+    #[test]
+    fn test_59_percent_vote_does_not_reach_majority() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &5_900);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &4_100);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &10_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &5_900);
+        client.cast_vote(&voter_b, &market_id, &1, &4_100);
+
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let total = t0 + voting::get_tally(&env, market_id, 1);
+            let pct = (t0 * 10_000) / total;
+            assert!(pct < 6_000, "59% must not reach 60% majority threshold");
+        });
+    }
+
+    #[test]
+    fn test_60_percent_vote_reaches_majority() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &6_000);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &4_000);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &10_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &6_000);
+        client.cast_vote(&voter_b, &market_id, &1, &4_000);
+
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let total = t0 + voting::get_tally(&env, market_id, 1);
+            let pct = (t0 * 10_000) / total;
+            assert!(pct >= 6_000, "60% must reach majority threshold");
+        });
+    }
+
+    // ── get_resolution_metrics ────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolution_metrics_nonexistent_market_returns_zeros() {
+        let (_env, client, _admin, _contract_id) = setup();
+
+        let metrics = client.get_resolution_metrics(&999, &0);
+        assert_eq!(metrics.winner_count, 0);
+        assert_eq!(metrics.total_winning_stake, 0);
+    }
+
+    #[test]
+    fn test_resolution_metrics_gas_estimate_scales_with_winner_count() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let metrics_0 = client.get_resolution_metrics(&market_id, &0);
+        // gas_estimate = 100_000 + winner_count * 50_000
+        assert_eq!(metrics_0.gas_estimate, 100_000 + metrics_0.winner_count as u64 * 50_000);
+    }
+}

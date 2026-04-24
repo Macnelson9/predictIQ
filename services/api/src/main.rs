@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(RateLimiter::new());
     let api_key_auth = Arc::new(ApiKeyAuth::new(config.api_keys.clone()));
     let ip_whitelist = Arc::new(IpWhitelist::new(config.admin_whitelist_ips.clone()));
+    let config_trust_proxy = config.trust_proxy;
 
     // Start rate limiter cleanup task
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -98,11 +99,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         config,
-        cache,
+        cache: cache.clone(),
         db,
         blockchain,
         metrics,
-        newsletter_rate_limiter: IpRateLimiter::default(),
+        newsletter_rate_limiter: IpRateLimiter::new(cache.clone()),
         email_service: email_service.clone(),
         email_queue: email_queue.clone(),
         webhook_handler: webhook_handler.clone(),
@@ -184,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(middleware::from_fn(validation::request_validation_middleware))
         .layer(middleware::from_fn(validation::request_size_validation_middleware))
         .layer(middleware::from_fn_with_state(
-            rate_limiter.clone(),
+            (rate_limiter.clone(), security::TrustProxy(config_trust_proxy)),
             security::global_rate_limit_middleware,
         ))
         .with_state(state.clone());
@@ -270,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
             idempotency::idempotency_middleware,
         ))
         .layer(middleware::from_fn_with_state(
-            ip_whitelist.clone(),
+            (ip_whitelist.clone(), security::TrustProxy(config_trust_proxy)),
             security::ip_whitelist_middleware,
         ))
         .layer(middleware::from_fn_with_state(

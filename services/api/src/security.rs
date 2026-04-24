@@ -6,6 +6,7 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
@@ -102,10 +103,9 @@ impl Default for RateLimiter {
 pub fn extract_client_ip(
     headers: &HeaderMap,
     connect_info: Option<&ConnectInfo<std::net::SocketAddr>>,
-    trusted_proxy_cidrs: &[ipnet::IpNet],
+    trust_proxy: bool,
 ) -> String {
-    let remote_ip = connect_info.map(|c| c.0.ip());
-    let proxy_trusted = remote_ip.map_or(false, |ip| trusted_proxy_cidrs.iter().any(|cidr| cidr.contains(&ip)));
+    let proxy_trusted = trust_proxy;
 
     if proxy_trusted {
         // 1. Check X-Forwarded-For header (from proxy/load balancer)
@@ -384,7 +384,7 @@ pub async fn metrics_auth_middleware(
     // IP allowlist check (when configured)
     if !config.allowlist.is_empty() {
         // Use empty CIDR list — allowlist check uses direct IP comparison, not proxy headers
-        let ip = extract_client_ip(&headers, connect_info.as_ref(), &[]);
+        let ip = extract_client_ip(&headers, connect_info.as_ref(), false);
         let parsed: Option<IpAddr> = ip.parse().ok();
         let allowed = parsed.map(|a| config.allowlist.contains(&a)).unwrap_or(false);
         if !allowed {
@@ -588,10 +588,10 @@ mod tests {
         let headers = HeaderMap::new();
 
         // No headers, no connect info
-        assert_eq!(extract_client_ip(&headers, None, &[]), "unknown");
+        assert_eq!(extract_client_ip(&headers, None, false), "unknown");
 
         let ci = addr("5.5.5.5:80");
-        assert_eq!(extract_client_ip(&headers, Some(&ci), &[]), "5.5.5.5");
+        assert_eq!(extract_client_ip(&headers, Some(&ci), false), "5.5.5.5");
     }
 
     #[test]
@@ -627,8 +627,8 @@ mod tests {
         );
     }
 
-    /// Both spoofed headers present — socket address still wins when proxy
-    /// trust is disabled.
+    /// Both spoofed headers present — returns "unknown" when proxy trust is
+    /// disabled and no socket address is available.
     #[test]
     fn both_spoofed_headers_ignored_when_trust_proxy_disabled() {
         let mut headers = HeaderMap::new();
@@ -637,7 +637,7 @@ mod tests {
             "2001:db8::1, 192.168.1.1".parse().unwrap(),
         );
 
-        assert_eq!(extract_client_ip(&headers, None, &[]), "2001:db8::1");
+        assert_eq!(extract_client_ip(&headers, None, false), "unknown");
     }
 }
 
@@ -666,6 +666,7 @@ pub async fn trace_propagation_middleware(
 
     // Attach context to current span
     let span = tracing::Span::current();
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
     span.set_parent(propagator);
 
     next.run(request).await

@@ -21,14 +21,10 @@ pub struct AuditLogEntry {
     pub user_agent: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "text")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditStatus {
-    #[sqlx(rename = "success")]
     Success,
-    #[sqlx(rename = "failure")]
     Failure,
-    #[sqlx(rename = "partial")]
     Partial,
 }
 
@@ -66,7 +62,7 @@ impl AuditLogger {
         )
         .bind(entry.timestamp)
         .bind(&entry.actor)
-        .bind(entry.actor_ip)
+        .bind(entry.actor_ip.map(|ip| ip.to_string()))
         .bind(&entry.action)
         .bind(&entry.resource_type)
         .bind(&entry.resource_id)
@@ -151,7 +147,7 @@ impl AuditLogger {
             i64,
             DateTime<Utc>,
             String,
-            Option<IpAddr>,
+            Option<String>,
             String,
             String,
             Option<String>,
@@ -188,7 +184,7 @@ impl AuditLogger {
                     id,
                     timestamp,
                     actor,
-                    actor_ip,
+                    actor_ip_str,
                     action,
                     resource_type,
                     resource_id,
@@ -202,7 +198,7 @@ impl AuditLogger {
                         id: Some(id),
                         timestamp,
                         actor,
-                        actor_ip,
+                        actor_ip: actor_ip_str.and_then(|s| s.parse().ok()),
                         action,
                         resource_type,
                         resource_id,

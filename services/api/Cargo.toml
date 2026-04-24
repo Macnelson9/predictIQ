@@ -43,9 +43,12 @@ hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 subtle = "2.5"
+ipnet = "2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+testcontainers = { version = "0.23", features = ["tokio"] }
+testcontainers-modules = { version = "0.11", features = ["redis", "tokio"] }
 
 [[bench]]
 name = "api_key_auth"

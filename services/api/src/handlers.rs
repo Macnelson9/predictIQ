@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -167,7 +167,7 @@ pub async fn newsletter_subscribe(
     let ip = extract_client_ip(
         &headers,
         connect_info.as_ref(),
-        &state.config.trusted_proxy_cidrs,
+        !state.config.trusted_proxy_cidrs.is_empty(),
     );
     let allowed = state
         .newsletter_rate_limiter
@@ -593,7 +593,7 @@ pub async fn resolve_market(
     let map_err = |e: anyhow::Error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError { message: e.to_string() }),
+            Json(ApiError { code: "INTERNAL_ERROR", message: e.to_string() }),
         )
     };
 
@@ -769,7 +769,7 @@ pub async fn warm_critical_caches(state: Arc<AppState>) -> anyhow::Result<()> {
     let _ = state.blockchain.health_check_cached().await?;
     let _ = state.blockchain.platform_statistics_cached().await?;
     let _ = statistics(State(state.clone())).await;
-    let _ = featured_markets(State(state)).await;
+    let _ = featured_markets(State(state.clone()), Query(PaginationQuery::default())).await;
     Ok(())
 }
 
