@@ -462,6 +462,32 @@ jobs:
           fi
         working-directory: contracts/predict-iq
 
+  api-cache-tests:
+    name: API Cache Tests (Redis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-api-${{ hashFiles('services/api/Cargo.lock') }}
+
+      - name: Run cache tests
+        run: cargo test --lib cache
+        working-directory: services/api
+
   all-tests-passed:
     name: All Tests Passed
     needs:
@@ -478,6 +504,7 @@ jobs:
       - oracle-quality-gate
       - format
       - build-optimized
+      - api-cache-tests
     runs-on: ubuntu-latest
     steps:
       - name: Success

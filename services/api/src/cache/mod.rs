@@ -93,6 +93,104 @@ impl RedisCache {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::redis::Redis;
+
+    use super::RedisCache;
+
+    async fn start_cache() -> (RedisCache, impl Drop) {
+        let container = Redis::default().start().await.expect("redis container");
+        let port = container
+            .get_host_port_ipv4(6379)
+            .await
+            .expect("redis port");
+        let url = format!("redis://127.0.0.1:{port}");
+        let cache = RedisCache::new(&url).await.expect("redis cache");
+        (cache, container)
+    }
+
+    #[tokio::test]
+    async fn cache_miss_populates_on_first_request() {
+        let (cache, _c) = start_cache().await;
+        let (val, hit) = cache
+            .get_or_set_json::<u32, _, _>("key:miss", Duration::from_secs(60), || async {
+                Ok(42u32)
+            })
+            .await
+            .unwrap();
+        assert_eq!(val, 42);
+        assert!(!hit, "first call must be a miss");
+        // Value must now be stored — a second call returns a hit with the same value.
+        let (val2, hit2) = cache
+            .get_or_set_json::<u32, _, _>("key:miss", Duration::from_secs(60), || async {
+                Ok(0u32) // would overwrite if fetcher were called
+            })
+            .await
+            .unwrap();
+        assert_eq!(val2, 42, "stored value must be returned on hit");
+        assert!(hit2, "second call must be a hit");
+    }
+
+    #[tokio::test]
+    async fn cache_hit_on_subsequent_request() {
+        let (cache, _c) = start_cache().await;
+        cache
+            .set_json("key:hit", &99u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+        let (val, hit) = cache
+            .get_or_set_json::<u32, _, _>("key:hit", Duration::from_secs(60), || async {
+                Ok(0u32) // must not be called
+            })
+            .await
+            .unwrap();
+        assert_eq!(val, 99, "cached value must be returned");
+        assert!(hit, "pre-populated key must be a hit");
+    }
+
+    #[tokio::test]
+    async fn del_invalidates_cached_entry() {
+        let (cache, _c) = start_cache().await;
+        cache
+            .set_json("key:del", &7u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache.del("key:del").await.unwrap();
+        let result: Option<u32> = cache.get_json("key:del").await.unwrap();
+        assert!(result.is_none(), "entry must be absent after del");
+    }
+
+    #[tokio::test]
+    async fn del_by_pattern_invalidates_matching_entries() {
+        let (cache, _c) = start_cache().await;
+        for i in 0..3u32 {
+            cache
+                .set_json(&format!("ns:item:{i}"), &i, Duration::from_secs(60))
+                .await
+                .unwrap();
+        }
+        cache
+            .set_json("other:item:0", &100u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let deleted = cache.del_by_pattern("ns:item:*").await.unwrap();
+        assert_eq!(deleted, 3);
+
+        for i in 0..3u32 {
+            let v: Option<u32> = cache.get_json(&format!("ns:item:{i}")).await.unwrap();
+            assert!(v.is_none(), "ns:item:{i} must be gone");
+        }
+        // unrelated key must survive
+        let other: Option<u32> = cache.get_json("other:item:0").await.unwrap();
+        assert_eq!(other, Some(100));
+    }
+}
+
 pub mod keys {
     pub const API_PREFIX: &str = "api:v1";
     pub const DBQ_PREFIX: &str = "dbq:v1";
