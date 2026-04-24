@@ -1,0 +1,11 @@
+environment         = "dev"
+aws_region          = "us-east-1"
+vpc_cidr_block      = "10.0.0.0/16"
+db_instance_class   = "db.t3.micro"
+allocated_storage   = 20
+backup_retention_days = 7
+redis_node_type     = "cache.t3.micro"
+redis_num_nodes     = 1
+api_desired_count   = 1
+api_cpu             = 256
+api_memory          = 512
