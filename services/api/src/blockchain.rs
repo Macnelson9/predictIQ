@@ -343,12 +343,10 @@ impl BlockchainClient {
     pub async fn user_bets_cached(
         &self,
         user: &str,
-        page: i64,
-        page_size: i64,
-    ) -> anyhow::Result<UserBetsPage> {
-        let page = page.max(1);
-        let page_size = page_size.clamp(1, 100);
-        let key = keys::chain_user_bets(&self.network, user, page, page_size);
+        limit: i64,
+    ) -> anyhow::Result<Vec<UserBet>> {
+        let limit = limit.clamp(1, 100);
+        let key = keys::chain_user_bets(&self.network, user, limit);
         let ttl = Duration::from_secs(30);
         let endpoint = "user_bets";
 
@@ -356,30 +354,23 @@ impl BlockchainClient {
             .cache
             .get_or_set_json(&key, ttl, || async move {
                 let ledger = self.latest_ledger().await.unwrap_or(0);
-                let offset = (page - 1) * page_size;
                 let data: Value = self
                     .rpc_call(
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
                             "key": format!("user_bets:{}", user),
-                            "limit": page_size,
-                            "offset": offset,
+                            "limit": limit,
                         }),
                     )
                     .await
-                    .unwrap_or_else(|_| json!({"bets": [], "total": 0}));
+                    .unwrap_or_else(|_| json!({"bets": []}));
 
                 let bets = data
                     .get("bets")
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-
-                let total = data
-                    .get("total")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(bets.len() as i64);
 
                 let items = bets
                     .into_iter()
@@ -405,13 +396,7 @@ impl BlockchainClient {
                     })
                     .collect::<Vec<_>>();
 
-                Ok(UserBetsPage {
-                    user: user.to_string(),
-                    page,
-                    page_size,
-                    total,
-                    items,
-                })
+                Ok(items)
             })
             .await?;
 

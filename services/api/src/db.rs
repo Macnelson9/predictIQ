@@ -177,31 +177,22 @@ impl Database {
         Ok(value)
     }
 
-    pub async fn content_cached(&self, page: i64, page_size: i64) -> anyhow::Result<ContentPage> {
-        let key = keys::dbq_content(page, page_size);
+    pub async fn content_cached(&self, limit: i64) -> anyhow::Result<Vec<ContentItem>> {
+        let key = keys::dbq_content(limit);
         let ttl = Duration::from_secs(60 * 60);
         let endpoint = "content";
-        let offset = (page.saturating_sub(1)) * page_size;
 
         let (value, hit) = self
             .cache
             .get_or_set_json(&key, ttl, || async move {
-                let total_row = sqlx::query(
-                    "SELECT COUNT(*)::BIGINT AS total FROM content WHERE is_published = TRUE",
-                )
-                .fetch_one(&self.pool)
-                .await?;
-                let total = total_row.try_get::<i64, _>("total")?;
-
                 let rows = sqlx::query(
                     "SELECT id, title, category, published_at \
                     FROM content \
                     WHERE is_published = TRUE \
                     ORDER BY published_at DESC \
-                    LIMIT $1 OFFSET $2",
+                    LIMIT $1",
                 )
-                .bind(page_size)
-                .bind(offset)
+                .bind(limit)
                 .fetch_all(&self.pool)
                 .await?;
 
@@ -215,12 +206,7 @@ impl Database {
                     });
                 }
 
-                Ok(ContentPage {
-                    page,
-                    page_size,
-                    total,
-                    items,
-                })
+                Ok(items)
             })
             .await?;
 

@@ -2,12 +2,14 @@ mod audit;
 mod audit_middleware;
 mod blockchain;
 mod cache;
+mod compression;
 mod config;
 mod db;
 mod email;
 mod handlers;
 mod metrics;
 mod newsletter;
+mod pagination;
 mod rate_limit;
 mod security;
 mod tracing_config;
@@ -276,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(newsletter_routes)
         .merge(webhook_routes)
         .merge(admin_routes)
+        .layer(compression::compression_layer())
         .layer(allowed_origins);
 
     let listener = TcpListener::bind(bind_addr).await?;

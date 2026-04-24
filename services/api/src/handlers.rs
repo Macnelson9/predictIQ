@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::ValidateEmail;
 
-use crate::{blockchain::HealthStatus, cache::keys, email::webhook::sendgrid_webhook_handler, AppState};
+use crate::{blockchain::HealthStatus, cache::keys, email::webhook::sendgrid_webhook_handler, pagination::{PaginatedResponse, PaginationQuery}, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct ApiError {
@@ -67,12 +67,6 @@ impl IntoResponse for ApiError {
 
 fn into_api_error(err: anyhow::Error) -> ApiError {
     ApiError::internal(err)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ContentQuery {
-    pub page: Option<i64>,
-    pub page_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,12 +420,6 @@ pub async fn newsletter_gdpr_delete(
     ))
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct PagingQuery {
-    pub page: Option<i64>,
-    pub page_size: Option<i64>,
-}
-
 pub async fn statistics(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     let start = Instant::now();
     let cache_key = keys::api_statistics();
@@ -459,8 +447,11 @@ pub async fn statistics(State(state): State<Arc<AppState>>) -> Result<impl IntoR
 
 pub async fn featured_markets(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let start = Instant::now();
+    let limit = query.limit();
+    let cursor = query.cursor();
     let cache_key = keys::api_featured_markets();
     let ttl = Duration::from_secs(2 * 60);
     let endpoint = "featured_markets";
@@ -493,6 +484,25 @@ pub async fn featured_markets(
         .await
         .map_err(into_api_error)?;
 
+    let start_idx = cursor
+        .as_ref()
+        .and_then(|c| c.parse::<usize>().ok())
+        .unwrap_or(0);
+    let end_idx = (start_idx + limit as usize).min(payload.len());
+    let has_more = end_idx < payload.len();
+    let next_cursor = if has_more {
+        Some(end_idx.to_string())
+    } else {
+        None
+    };
+
+    let paginated = PaginatedResponse::new(
+        payload[start_idx..end_idx].to_vec(),
+        next_cursor,
+        limit,
+        has_more,
+    );
+
     if hit {
         state.metrics.observe_hit("api", endpoint);
     } else {
@@ -500,32 +510,48 @@ pub async fn featured_markets(
     }
     state.metrics.observe_request(endpoint, start.elapsed());
 
-    Ok((StatusCode::OK, Json(payload)))
+    Ok((StatusCode::OK, Json(paginated)))
 }
 
 pub async fn content(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ContentQuery>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let start = Instant::now();
-    let page = query.page.unwrap_or(1).max(1);
-    let page_size = query
-        .page_size
-        .unwrap_or(state.config.content_default_page_size)
-        .clamp(1, 100);
+    let limit = query.limit();
+    let cursor = query.cursor();
     let endpoint = "content";
 
-    let cache_key = keys::api_content(page, page_size);
+    let cache_key = keys::api_content(limit);
     let ttl = Duration::from_secs(60 * 60);
 
     let (payload, hit) = state
         .cache
         .get_or_set_json(&cache_key, ttl, || async {
-            let data = state.db.content_cached(page, page_size).await?;
+            let data = state.db.content_cached(limit).await?;
             Ok(data)
         })
         .await
         .map_err(into_api_error)?;
+
+    let start_idx = cursor
+        .as_ref()
+        .and_then(|c| c.parse::<usize>().ok())
+        .unwrap_or(0);
+    let end_idx = (start_idx + limit as usize).min(payload.len());
+    let has_more = end_idx < payload.len();
+    let next_cursor = if has_more {
+        Some(end_idx.to_string())
+    } else {
+        None
+    };
+
+    let paginated = PaginatedResponse::new(
+        payload[start_idx..end_idx].to_vec(),
+        next_cursor,
+        limit,
+        has_more,
+    );
 
     if hit {
         state.metrics.observe_hit("api", endpoint);
@@ -534,7 +560,7 @@ pub async fn content(
     }
     state.metrics.observe_request(endpoint, start.elapsed());
 
-    Ok((StatusCode::OK, Json(payload)))
+    Ok((StatusCode::OK, Json(paginated)))
 }
 
 #[derive(Debug, Serialize)]
@@ -665,16 +691,36 @@ pub async fn blockchain_platform_stats(
 pub async fn blockchain_user_bets(
     State(state): State<Arc<AppState>>,
     Path(user): Path<String>,
-    Query(query): Query<PagingQuery>,
+    Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let page = query.page.unwrap_or(1).max(1);
-    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+    let limit = query.limit();
+    let cursor = query.cursor();
     let data = state
         .blockchain
-        .user_bets_cached(&user, page, page_size)
+        .user_bets_cached(&user, limit)
         .await
         .map_err(into_api_error)?;
-    Ok((StatusCode::OK, Json(data)))
+
+    let start_idx = cursor
+        .as_ref()
+        .and_then(|c| c.parse::<usize>().ok())
+        .unwrap_or(0);
+    let end_idx = (start_idx + limit as usize).min(data.len());
+    let has_more = end_idx < data.len();
+    let next_cursor = if has_more {
+        Some(end_idx.to_string())
+    } else {
+        None
+    };
+
+    let paginated = PaginatedResponse::new(
+        data[start_idx..end_idx].to_vec(),
+        next_cursor,
+        limit,
+        has_more,
+    );
+
+    Ok((StatusCode::OK, Json(paginated)))
 }
 
 pub async fn blockchain_oracle_result(

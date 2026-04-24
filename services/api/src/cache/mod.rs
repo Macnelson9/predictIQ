@@ -106,8 +106,8 @@ pub mod keys {
         format!("{API_PREFIX}:featured_markets")
     }
 
-    pub fn api_content(page: i64, page_size: i64) -> String {
-        format!("{API_PREFIX}:content:page:{page}:size:{page_size}")
+    pub fn api_content(limit: i64) -> String {
+        format!("{API_PREFIX}:content:limit:{limit}")
     }
 
     pub fn dbq_statistics() -> String {
@@ -118,8 +118,8 @@ pub mod keys {
         format!("{DBQ_PREFIX}:featured_markets:limit:{limit}")
     }
 
-    pub fn dbq_content(page: i64, page_size: i64) -> String {
-        format!("{DBQ_PREFIX}:content:page:{page}:size:{page_size}")
+    pub fn dbq_content(limit: i64) -> String {
+        format!("{DBQ_PREFIX}:content:limit:{limit}")
     }
 
     pub fn chain_market(market_id: i64) -> String {
@@ -130,9 +130,9 @@ pub mod keys {
         format!("{CHAIN_PREFIX}:platform_stats:{network}")
     }
 
-    pub fn chain_user_bets(network: &str, user: &str, page: i64, page_size: i64) -> String {
+    pub fn chain_user_bets(network: &str, user: &str, limit: i64) -> String {
         format!(
-            "{CHAIN_PREFIX}:user_bets:{network}:{}:page:{page}:size:{page_size}",
+            "{CHAIN_PREFIX}:user_bets:{network}:{}:limit:{limit}",
             user.to_lowercase()
         )
     }
