@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::types::{ConfigKey, CreatorReputation, Market, MarketStatus, MarketTier, OracleConfig, TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD, PRUNE_GRACE_PERIOD};
-use soroban_sdk::{contracttype, token, Address, Env, String, Vec, Map};
+use soroban_sdk::{contracttype, token, Address, Env, String, Vec};
 
 #[contracttype]
 pub enum DataKey {
@@ -248,9 +248,8 @@ pub fn clamp_limit(limit: u32) -> u32 {
 
 /// Prune (archive) a market that has been resolved and all prizes claimed
 /// Can only be called 30 days after resolution
+/// This is permissionless - anyone can prune expired markets
 pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
-    crate::modules::admin::require_admin(e)?;
-    
     let market = get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 
     // Market must be resolved
@@ -266,8 +265,14 @@ pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
         return Err(ErrorCode::MarketNotActive);
     }
 
+    // Archive the market ID for off-chain indexers
+    crate::modules::event_archive::archive_market(e, market_id);
+
     // Remove market from persistent storage
     e.storage().persistent().remove(&DataKey::Market(market_id));
+
+    // Emit pruning event
+    crate::modules::events::emit_market_pruned(e, market_id, current_time);
 
     Ok(())
 }

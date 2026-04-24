@@ -193,3 +193,10 @@ pub fn emit_monitoring_state_reset(
         (previous_error_count, previous_last_observation),
     );
 }
+
+pub fn emit_market_pruned(e: &Env, market_id: u64, pruned_at: u64) {
+    e.events().publish(
+        (symbol_short!("mkt_prune"), market_id),
+        pruned_at,
+    );
+}
