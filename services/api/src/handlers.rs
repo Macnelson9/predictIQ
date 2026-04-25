@@ -104,6 +104,9 @@ pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
             "pool_size": pool.size,
             "pool_available": pool.available,
         },
+        "db": {
+            "status": "ok",
+        },
         "workers": {
             "blockchain_sync": "running",
             "blockchain_monitor": "running",
@@ -115,6 +118,11 @@ pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
     if state.cache.ping().await.is_err() {
         health_status["status"] = "degraded".into();
         health_status["redis"]["status"] = "unhealthy".into();
+    }
+
+    if state.db.ping().await.is_err() {
+        health_status["status"] = "degraded".into();
+        health_status["db"]["status"] = "unhealthy".into();
     }
 
     if let Ok(processing_count) = state.email_queue.get_processing_count().await {
