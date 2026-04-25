@@ -1,81 +1,317 @@
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
-use redis::{aio::ConnectionManager, AsyncCommands, Client};
+use deadpool_redis::{Config as PoolConfig, Pool, Runtime};
+use redis::AsyncCommands;
 use serde::{de::DeserializeOwned, Serialize};
+
+// ── Circuit breaker ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+/// Atomic circuit breaker.  All state is lock-free.
+struct CircuitBreaker {
+    failure_count: AtomicU32,
+    /// Unix-epoch millis when the circuit was opened; 0 = not open.
+    opened_at_ms: AtomicU64,
+    threshold: u32,
+    reset_timeout: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: u32, reset_timeout: Duration) -> Self {
+        Self {
+            failure_count: AtomicU32::new(0),
+            opened_at_ms: AtomicU64::new(0),
+            threshold,
+            reset_timeout,
+        }
+    }
+
+    fn state(&self) -> CircuitState {
+        let opened_at = self.opened_at_ms.load(Ordering::Acquire);
+        if opened_at == 0 {
+            return CircuitState::Closed;
+        }
+        let elapsed = Instant::now()
+            .duration_since(Instant::now()) // placeholder — use wall clock below
+            .as_millis() as u64;
+        let _ = elapsed; // suppress warning; we use system time instead
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now_ms.saturating_sub(opened_at) >= self.reset_timeout.as_millis() as u64 {
+            CircuitState::HalfOpen
+        } else {
+            CircuitState::Open
+        }
+    }
+
+    fn record_success(&self) {
+        self.failure_count.store(0, Ordering::Release);
+        self.opened_at_ms.store(0, Ordering::Release);
+    }
+
+    fn record_failure(&self) {
+        let prev = self.failure_count.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 >= self.threshold && self.opened_at_ms.load(Ordering::Acquire) == 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.opened_at_ms.store(now_ms, Ordering::Release);
+            tracing::warn!(
+                threshold = self.threshold,
+                "Redis circuit breaker opened after {} failures",
+                prev + 1
+            );
+        }
+    }
+
+    /// Returns `true` if the call is allowed (Closed or HalfOpen).
+    fn allow(&self) -> bool {
+        match self.state() {
+            CircuitState::Closed | CircuitState::HalfOpen => true,
+            CircuitState::Open => false,
+        }
+    }
+}
+
+// ── Pool config from env ─────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct RedisCacheConfig {
+    pub pool_min_idle: usize,
+    pub pool_max_size: usize,
+    /// Timeout for acquiring a connection from the pool.
+    pub acquire_timeout: Duration,
+    /// Retry attempts on transient errors (0 = no retry).
+    pub retry_attempts: u32,
+    /// Base delay for exponential backoff.
+    pub retry_base_delay: Duration,
+    /// Circuit breaker: failures before opening.
+    pub cb_threshold: u32,
+    /// Circuit breaker: how long to stay open before half-open probe.
+    pub cb_reset_timeout: Duration,
+}
+
+impl RedisCacheConfig {
+    pub fn from_env() -> Self {
+        let pool_min_idle = std::env::var("REDIS_POOL_MIN_IDLE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2usize);
+        let pool_max_size = std::env::var("REDIS_POOL_MAX_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20usize)
+            .max(pool_min_idle);
+        let acquire_timeout = Duration::from_millis(
+            std::env::var("REDIS_POOL_ACQUIRE_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500u64),
+        );
+        let retry_attempts = std::env::var("REDIS_RETRY_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3u32);
+        let retry_base_delay = Duration::from_millis(
+            std::env::var("REDIS_RETRY_BASE_DELAY_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50u64),
+        );
+        let cb_threshold = std::env::var("REDIS_CB_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5u32);
+        let cb_reset_timeout = Duration::from_secs(
+            std::env::var("REDIS_CB_RESET_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30u64),
+        );
+        Self {
+            pool_min_idle,
+            pool_max_size,
+            acquire_timeout,
+            retry_attempts,
+            retry_base_delay,
+            cb_threshold,
+            cb_reset_timeout,
+        }
+    }
+}
+
+// ── RedisCache ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct RedisCache {
-    pub(crate) manager: ConnectionManager,
+    pool: Pool,
+    cb: Arc<CircuitBreaker>,
+    cfg: RedisCacheConfig,
 }
 
 impl RedisCache {
     pub async fn new(redis_url: &str) -> anyhow::Result<Self> {
-        let client = Client::open(redis_url).context("invalid REDIS_URL")?;
-        let manager = client
-            .get_connection_manager()
-            .await
-            .context("failed to connect to redis")?;
-        Ok(Self { manager })
+        Self::new_with_config(redis_url, RedisCacheConfig::from_env()).await
     }
+
+    pub async fn new_with_config(redis_url: &str, cfg: RedisCacheConfig) -> anyhow::Result<Self> {
+        let pool_cfg = PoolConfig::from_url(redis_url);
+        let pool = pool_cfg
+            .builder()
+            .context("failed to build Redis pool config")?
+            .max_size(cfg.pool_max_size)
+            .wait_timeout(Some(cfg.acquire_timeout))
+            .build()
+            .context("failed to build Redis pool")?;
+
+        let cb = Arc::new(CircuitBreaker::new(cfg.cb_threshold, cfg.cb_reset_timeout));
+        Ok(Self { pool, cb, cfg })
+    }
+
+    /// Returns the current circuit breaker state — useful for health checks and metrics.
+    pub fn circuit_state(&self) -> CircuitState {
+        self.cb.state()
+    }
+
+    /// Pool status for metrics/health.
+    pub fn pool_status(&self) -> deadpool_redis::Status {
+        self.pool.status()
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /// Execute `op` with retry + circuit breaker.  On circuit open, returns
+    /// `Err` immediately so callers can degrade gracefully.
+    async fn exec<T, F, Fut>(&self, op: F) -> anyhow::Result<T>
+    where
+        F: Fn(deadpool_redis::Connection) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
+        if !self.cb.allow() {
+            anyhow::bail!("Redis circuit breaker is open");
+        }
+
+        let mut last_err = anyhow::anyhow!("no attempts made");
+        for attempt in 0..=self.cfg.retry_attempts {
+            if attempt > 0 {
+                let delay = self.cfg.retry_base_delay * (1 << (attempt - 1).min(4));
+                tokio::time::sleep(delay).await;
+            }
+            match self.pool.get().await {
+                Err(e) => {
+                    last_err = anyhow::anyhow!("pool acquire: {e}");
+                    self.cb.record_failure();
+                }
+                Ok(conn) => match op(conn).await {
+                    Ok(v) => {
+                        self.cb.record_success();
+                        return Ok(v);
+                    }
+                    Err(e) => {
+                        last_err = e;
+                        self.cb.record_failure();
+                    }
+                },
+            }
+        }
+        Err(last_err)
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────────
 
     pub async fn get_json<T>(&self, key: &str) -> anyhow::Result<Option<T>>
     where
         T: DeserializeOwned,
     {
-        let mut conn = self.manager.clone();
-        let val: Option<String> = conn.get(key).await?;
-        match val {
-            Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
-            None => Ok(None),
-        }
+        let key = key.to_owned();
+        self.exec(|mut conn| async move {
+            let val: Option<String> = conn.get(&key).await?;
+            match val {
+                Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+                None => Ok(None),
+            }
+        })
+        .await
     }
 
     pub async fn set_json<T>(&self, key: &str, value: &T, ttl: Duration) -> anyhow::Result<()>
     where
         T: Serialize,
     {
-        let mut conn = self.manager.clone();
+        let key = key.to_owned();
         let raw = serde_json::to_string(value)?;
-        let _: () = conn.set_ex(key, raw, ttl.as_secs()).await?;
-        Ok(())
+        let secs = ttl.as_secs();
+        self.exec(|mut conn| {
+            let key = key.clone();
+            let raw = raw.clone();
+            async move {
+                let _: () = conn.set_ex(&key, raw, secs).await?;
+                Ok(())
+            }
+        })
+        .await
     }
 
     pub async fn del(&self, key: &str) -> anyhow::Result<()> {
-        let mut conn = self.manager.clone();
-        let _: usize = conn.del(key).await?;
-        Ok(())
+        let key = key.to_owned();
+        self.exec(|mut conn| async move {
+            let _: usize = conn.del(&key).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn ping(&self) -> anyhow::Result<()> {
-        let mut conn = self.manager.clone();
-        let _: String = redis::cmd("PING").query_async(&mut conn).await?;
-        Ok(())
+        self.exec(|mut conn| async move {
+            let _: String = redis::cmd("PING").query_async(&mut conn).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn del_by_pattern(&self, pattern: &str) -> anyhow::Result<usize> {
-        let mut conn = self.manager.clone();
-        let mut cursor: u64 = 0;
-        let mut total_deleted: usize = 0;
-        loop {
-            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(pattern)
-                .arg("COUNT")
-                .arg(100u64)
-                .query_async(&mut conn)
-                .await?;
-            if !keys.is_empty() {
-                let deleted: usize = conn.del(keys).await?;
-                total_deleted += deleted;
+        let pattern = pattern.to_owned();
+        self.exec(|mut conn| async move {
+            let mut cursor: u64 = 0;
+            let mut total_deleted: usize = 0;
+            loop {
+                let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(100u64)
+                    .query_async(&mut conn)
+                    .await?;
+                if !keys.is_empty() {
+                    let deleted: usize = conn.del(keys).await?;
+                    total_deleted += deleted;
+                }
+                cursor = next_cursor;
+                if cursor == 0 {
+                    break;
+                }
             }
-            cursor = next_cursor;
-            if cursor == 0 {
-                break;
-            }
-        }
-        Ok(total_deleted)
+            Ok(total_deleted)
+        })
+        .await
     }
 
     pub async fn get_or_set_json<T, F, Fut>(
@@ -89,12 +325,22 @@ impl RedisCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
-        if let Some(cached) = self.get_json(key).await? {
+        // If circuit is open, skip cache entirely and call fetcher directly.
+        if !self.cb.allow() {
+            tracing::warn!(key, "Redis unavailable, bypassing cache");
+            let value = fetcher().await?;
+            return Ok((value, false));
+        }
+
+        if let Ok(Some(cached)) = self.get_json(key).await {
             return Ok((cached, true));
         }
 
         let value = fetcher().await?;
-        self.set_json(key, &value, ttl).await?;
+        // Best-effort write — don't fail the request if cache write fails.
+        if let Err(e) = self.set_json(key, &value, ttl).await {
+            tracing::warn!(key, error = %e, "cache write failed");
+        }
         Ok((value, false))
     }
 }
@@ -130,10 +376,9 @@ mod tests {
             .unwrap();
         assert_eq!(val, 42);
         assert!(!hit, "first call must be a miss");
-        // Value must now be stored — a second call returns a hit with the same value.
         let (val2, hit2) = cache
             .get_or_set_json::<u32, _, _>("key:miss", Duration::from_secs(60), || async {
-                Ok(0u32) // would overwrite if fetcher were called
+                Ok(0u32)
             })
             .await
             .unwrap();
@@ -150,7 +395,7 @@ mod tests {
             .unwrap();
         let (val, hit) = cache
             .get_or_set_json::<u32, _, _>("key:hit", Duration::from_secs(60), || async {
-                Ok(0u32) // must not be called
+                Ok(0u32)
             })
             .await
             .unwrap();
@@ -191,9 +436,42 @@ mod tests {
             let v: Option<u32> = cache.get_json(&format!("ns:item:{i}")).await.unwrap();
             assert!(v.is_none(), "ns:item:{i} must be gone");
         }
-        // unrelated key must survive
         let other: Option<u32> = cache.get_json("other:item:0").await.unwrap();
         assert_eq!(other, Some(100));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_degrades_gracefully() {
+        use super::{CircuitState, RedisCacheConfig};
+        use std::time::Duration;
+
+        // Point at a port that has nothing listening → immediate failures.
+        let cfg = RedisCacheConfig {
+            pool_min_idle: 1,
+            pool_max_size: 2,
+            acquire_timeout: Duration::from_millis(50),
+            retry_attempts: 0,
+            retry_base_delay: Duration::from_millis(10),
+            cb_threshold: 2,
+            cb_reset_timeout: Duration::from_secs(60),
+        };
+        let cache = RedisCache::new_with_config("redis://127.0.0.1:19999", cfg)
+            .await
+            .unwrap();
+
+        // Two failures should open the circuit.
+        let _ = cache.ping().await;
+        let _ = cache.ping().await;
+
+        assert_eq!(cache.circuit_state(), CircuitState::Open);
+
+        // get_or_set_json must bypass cache and call fetcher when open.
+        let (val, hit) = cache
+            .get_or_set_json::<u32, _, _>("k", Duration::from_secs(60), || async { Ok(7u32) })
+            .await
+            .unwrap();
+        assert_eq!(val, 7);
+        assert!(!hit);
     }
 }
 

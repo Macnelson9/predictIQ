@@ -79,25 +79,44 @@ pub struct FeaturedMarketView {
     pub resolved_outcome: Option<u32>,
 }
 
-pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    use crate::cache::CircuitState;
+    use crate::correlation::REQUEST_ID_HEADER;
+
+    let request_id = headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+
+    let cb_state = match state.cache.circuit_state() {
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "open",
+        CircuitState::HalfOpen => "half_open",
+    };
+    let pool = state.cache.pool_status();
+
     let mut health_status = serde_json::json!({
         "status": "ok",
         "timestamp": chrono::Utc::now().to_rfc3339(),
+        "request_id": request_id,
+        "redis": {
+            "circuit_breaker": cb_state,
+            "pool_size": pool.size,
+            "pool_available": pool.available,
+        },
         "workers": {
             "blockchain_sync": "running",
-            "blockchain_monitor": "running", 
+            "blockchain_monitor": "running",
             "email_queue": "running",
             "rate_limiter_cleanup": "running"
         }
     });
 
-    // Check if we can connect to Redis
-    if let Err(_) = state.cache.ping().await {
+    if state.cache.ping().await.is_err() {
         health_status["status"] = "degraded".into();
-        health_status["workers"]["redis"] = "unhealthy".into();
+        health_status["redis"]["status"] = "unhealthy".into();
     }
 
-    // Check email queue health
     if let Ok(processing_count) = state.email_queue.get_processing_count().await {
         health_status["workers"]["email_queue_processing"] = processing_count.into();
     }
@@ -278,7 +297,11 @@ pub async fn newsletter_subscribe(
             .map_err(into_api_error)?;
     }
 
-    tracing::info!("[newsletter] subscription attempt email={email} source={source} ip={ip}");
+    let request_id = headers
+        .get(crate::correlation::REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    tracing::info!(request_id, email = %email, source = %source, ip = %ip, "newsletter subscription attempt");
 
     Ok((
         StatusCode::OK,
