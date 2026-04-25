@@ -3,8 +3,10 @@
  * Run `npm run generate-client` to regenerate `schema.d.ts` after API changes.
  */
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:3001";
+import { getEnvConfig } from './env';
+
+const config = getEnvConfig();
+const BASE_URL = config.apiUrl.replace(/\/$/, "");
 
 type HttpMethod = "GET" | "POST" | "DELETE";
 
