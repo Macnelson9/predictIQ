@@ -50,9 +50,38 @@ pub fn create_market(
         if parent_outcome_idx >= parent_market.options.len() {
             return Err(ErrorCode::InvalidOutcome);
         }
+
+        // Issue #069: Conditional market inherits parent constraints.
+        // The conditional market's deadline must not exceed the parent's resolution_deadline
+        // to ensure the conditional market cannot outlive its parent context.
+        if deadline > parent_market.resolution_deadline {
+            return Err(ErrorCode::DeadlinePassed);
+        }
     }
 
     let reputation = get_creator_reputation(e, &creator);
+
+    // Issue #070: Enforce tier access control — creator reputation must meet or exceed the
+    // requested market tier.
+    //
+    // Tier requirements:
+    //   Basic       — any reputation (None, Basic, Pro, Institutional)
+    //   Pro         — requires Pro or Institutional reputation
+    //   Institutional — requires Institutional reputation
+    //
+    // Upgrade path: admin calls set_creator_reputation() to elevate a creator's reputation.
+    let tier_allowed = match &tier {
+        MarketTier::Basic => true,
+        MarketTier::Pro => matches!(
+            reputation,
+            CreatorReputation::Pro | CreatorReputation::Institutional
+        ),
+        MarketTier::Institutional => matches!(reputation, CreatorReputation::Institutional),
+    };
+    if !tier_allowed {
+        return Err(ErrorCode::InsufficientReputation);
+    }
+
     let creation_deposit = get_creation_deposit(e);
 
     // Check if deposit is required based on reputation

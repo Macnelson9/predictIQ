@@ -53,6 +53,23 @@ pub fn cast_vote(
         .dispute_snapshot_ledger
         .ok_or(ErrorCode::MarketNotDisputed)?;
 
+    // Issue #068: Vote weight is proportional to governance token stake.
+    //
+    // Weight calculation:
+    //   1. Primary path  — query the governance token's `balance_at(voter, snapshot_ledger)`
+    //      to get the voter's balance at the exact ledger when the dispute was filed.
+    //      This prevents weight manipulation by buying tokens after a dispute starts.
+    //   2. Fallback path — if the token contract does not support `balance_at` (older tokens),
+    //      the caller-supplied `weight` is used, but only up to their current live balance.
+    //      Tokens are physically locked in the contract for the dispute duration and released
+    //      only after the market reaches `Resolved` status (see unlock_tokens).
+    //
+    // Manipulation prevention:
+    //   - Snapshot ledger is set at dispute-filing time and is immutable.
+    //   - Fallback tokens are locked so the same tokens cannot be double-voted.
+    //   - Per-user LockedBalance tracking (DataKey::LockedBalance) prevents pool drain.
+    //   - Vote revision decrements the old tally before adding the new one.
+
     // Issue #3: GovernanceToken now exists in ConfigKey
     let gov_token: Address = e
         .storage()
