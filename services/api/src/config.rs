@@ -81,6 +81,14 @@ pub struct Config {
     /// How long (in seconds) an idempotency key is retained in Redis.
     /// Defaults to 86400 (24 hours). Set via `IDEMPOTENCY_WINDOW_SECS`.
     pub idempotency_window_secs: u64,
+    /// TTL for newsletter confirmation tokens (seconds). Default: 86400 (24h).
+    pub newsletter_token_ttl_secs: u64,
+    /// GDPR export rate limit: max requests per window per IP/email. Default: 3.
+    pub gdpr_export_rate_limit: u32,
+    /// GDPR export rate limit window (seconds). Default: 3600.
+    pub gdpr_export_rate_window_secs: u64,
+    /// HMAC secret for signing unsubscribe tokens.
+    pub unsubscribe_signing_secret: Option<String>,
 }
 
 impl Config {
@@ -242,6 +250,19 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(86400),
+            newsletter_token_ttl_secs: env::var("NEWSLETTER_TOKEN_TTL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(86400),
+            gdpr_export_rate_limit: env::var("GDPR_EXPORT_RATE_LIMIT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+            gdpr_export_rate_window_secs: env::var("GDPR_EXPORT_RATE_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3600),
+            unsubscribe_signing_secret: env::var("UNSUBSCRIBE_SIGNING_SECRET").ok(),
         }
     }
 

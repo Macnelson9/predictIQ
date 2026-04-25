@@ -122,6 +122,11 @@ pub struct NewsletterConfirmQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct NewsletterUnsubscribeQuery {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewsletterExportQuery {
     pub email: String,
 }
@@ -219,52 +224,59 @@ pub async fn newsletter_subscribe(
         source
     };
 
-    if let Some(existing) = state
+    // Always upsert and send confirmation — uniform response prevents enumeration.
+    // For already-confirmed active subscribers we skip the DB write but still
+    // return the same success body and status so response time/body are identical.
+    let existing = state
         .db
         .newsletter_get_by_email(&email)
         .await
-        .map_err(into_api_error)?
-    {
-        if existing.confirmed && existing.unsubscribed_at.is_none() {
-            return Ok((
-                StatusCode::CONFLICT,
-                Json(NewsletterResponse {
-                    success: false,
-                    message: "Email already subscribed.".to_string(),
-                }),
-            ));
-        }
+        .map_err(into_api_error)?;
+
+    let already_active = existing
+        .as_ref()
+        .map(|s| s.confirmed && s.unsubscribed_at.is_none())
+        .unwrap_or(false);
+
+    if !already_active {
+        let token = Uuid::new_v4().to_string();
+        state
+            .db
+            .newsletter_upsert_pending(&email, &source, &token)
+            .await
+            .map_err(into_api_error)?;
+
+        let confirm_url = format!(
+            "{}/api/v1/newsletter/confirm?token={token}",
+            state.config.base_url.trim_end_matches('/')
+        );
+        let unsubscribe_url = state
+            .config
+            .unsubscribe_signing_secret
+            .as_deref()
+            .and_then(|secret| crate::newsletter::generate_unsubscribe_token(&email, secret).ok())
+            .map(|tok| format!(
+                "{}/api/v1/newsletter/unsubscribe?token={tok}",
+                state.config.base_url.trim_end_matches('/')
+            ))
+            .unwrap_or_default();
+        let template_data = serde_json::json!({
+            "confirm_url": confirm_url,
+            "unsubscribe_url": unsubscribe_url,
+            "email": email
+        });
+        state
+            .email_queue
+            .enqueue(
+                crate::email::types::EmailJobType::NewsletterConfirmation,
+                &email,
+                "newsletter_confirmation",
+                template_data,
+                0,
+            )
+            .await
+            .map_err(into_api_error)?;
     }
-
-    let token = Uuid::new_v4().to_string();
-    state
-        .db
-        .newsletter_upsert_pending(&email, &source, &token)
-        .await
-        .map_err(into_api_error)?;
-
-    // Queue confirmation email instead of sending directly
-    let confirm_url = format!(
-        "{}/api/v1/newsletter/confirm?token={token}",
-        state.config.base_url.trim_end_matches('/')
-    );
-
-    let template_data = serde_json::json!({
-        "confirm_url": confirm_url,
-        "email": email
-    });
-
-    state
-        .email_queue
-        .enqueue(
-            crate::email::types::EmailJobType::NewsletterConfirmation,
-            &email,
-            "newsletter_confirmation",
-            template_data,
-            0,
-        )
-        .await
-        .map_err(into_api_error)?;
 
     tracing::info!("[newsletter] subscription attempt email={email} source={source} ip={ip}");
 
@@ -293,7 +305,7 @@ pub async fn newsletter_confirm(
 
     let updated = state
         .db
-        .newsletter_confirm_by_token(query.token.trim())
+        .newsletter_confirm_by_token(query.token.trim(), state.config.newsletter_token_ttl_secs)
         .await
         .map_err(into_api_error)?;
 
@@ -318,16 +330,32 @@ pub async fn newsletter_confirm(
 
 pub async fn newsletter_unsubscribe(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<NewsletterEmailRequest>,
+    Query(query): Query<NewsletterUnsubscribeQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let Some(email) = normalized_email(&payload.email) else {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(NewsletterResponse {
-                success: false,
-                message: "Invalid email address.".to_string(),
-            }),
-        ));
+    let secret = match state.config.unsubscribe_signing_secret.as_deref() {
+        Some(s) => s.to_string(),
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(NewsletterResponse {
+                    success: false,
+                    message: "Unsubscribe not configured.".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let email = match crate::newsletter::validate_unsubscribe_token(&query.token, &secret) {
+        Some(e) => e,
+        None => {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                Json(NewsletterResponse {
+                    success: false,
+                    message: "Invalid unsubscribe token.".to_string(),
+                }),
+            ));
+        }
     };
 
     let _ = state
@@ -349,8 +377,35 @@ pub async fn newsletter_unsubscribe(
 
 pub async fn newsletter_gdpr_export(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Query(query): Query<NewsletterExportQuery>,
 ) -> Result<Response, ApiError> {
+    use crate::security::extract_client_ip;
+    let ip = extract_client_ip(
+        &headers,
+        connect_info.as_ref(),
+        !state.config.trusted_proxy_cidrs.is_empty(),
+    );
+    let allowed_ip = state
+        .newsletter_rate_limiter
+        .allow(
+            &format!("gdpr_export:ip:{ip}"),
+            state.config.gdpr_export_rate_limit as usize,
+            std::time::Duration::from_secs(state.config.gdpr_export_rate_window_secs),
+        )
+        .await;
+    if !allowed_ip {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(NewsletterResponse {
+                success: false,
+                message: "Too many requests, please try again later.".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
     let Some(email) = normalized_email(&query.email) else {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -367,6 +422,26 @@ pub async fn newsletter_gdpr_export(
         .newsletter_get_by_email(&email)
         .await
         .map_err(into_api_error)?;
+
+    // Per-email rate limit (separate from IP limit)
+    let allowed_email = state
+        .newsletter_rate_limiter
+        .allow(
+            &format!("gdpr_export:email:{email}"),
+            state.config.gdpr_export_rate_limit as usize,
+            std::time::Duration::from_secs(state.config.gdpr_export_rate_window_secs),
+        )
+        .await;
+    if !allowed_email {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(NewsletterResponse {
+                success: false,
+                message: "Too many requests, please try again later.".to_string(),
+            }),
+        )
+            .into_response());
+    }
 
     let Some(data) = data else {
         return Ok((
