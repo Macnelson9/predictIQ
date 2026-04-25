@@ -24,6 +24,9 @@ pub fn create_market(
 ) -> Result<u64, ErrorCode> {
     creator.require_auth();
 
+    // Issue #512: Check circuit breaker - prevent market creation during emergency pause
+    crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
+
     // Issue #510: Validate market deadlines
     let current_time = e.ledger().timestamp();
     
