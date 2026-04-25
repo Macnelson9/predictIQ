@@ -1,4 +1,4 @@
-import { api } from '../client';
+import { api, ApiError } from '../client';
 
 describe('API Client', () => {
   const originalFetch = global.fetch;
@@ -320,6 +320,72 @@ describe('API Client', () => {
           body: JSON.stringify({ email: 'test@example.com' }),
         })
       );
+    });
+  });
+
+  describe('ApiError', () => {
+    it('should throw ApiError with status code on non-2xx response', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => ({ message: 'Market not found' }),
+      });
+
+      try {
+        await api.getBlockchainMarket(999);
+        fail('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(ApiError);
+        expect((e as ApiError).status).toBe(404);
+        expect((e as ApiError).message).toBe('Market not found');
+        expect((e as ApiError).isClientError).toBe(true);
+        expect((e as ApiError).isServerError).toBe(false);
+        expect((e as ApiError).isNetworkError).toBe(false);
+      }
+    });
+
+    it('should throw ApiError with status 0 on network failure', async () => {
+      (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('Failed to fetch'));
+
+      try {
+        await api.health();
+        fail('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(ApiError);
+        expect((e as ApiError).status).toBe(0);
+        expect((e as ApiError).isNetworkError).toBe(true);
+        expect((e as ApiError).message).toContain('Unable to reach the server');
+        expect((e as ApiError).message).toContain('Failed to fetch');
+      }
+    });
+
+    it('should classify 5xx as server error', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: async () => ({ message: 'Service Unavailable' }),
+      });
+
+      try {
+        await api.getStatistics();
+        fail('should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(ApiError);
+        expect((e as ApiError).isServerError).toBe(true);
+        expect((e as ApiError).isClientError).toBe(false);
+      }
+    });
+
+    it('should have name "ApiError"', async () => {
+      (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('offline'));
+
+      try {
+        await api.health();
+      } catch (e) {
+        expect((e as ApiError).name).toBe('ApiError');
+      }
     });
   });
 });

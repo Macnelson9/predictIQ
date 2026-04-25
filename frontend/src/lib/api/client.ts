@@ -4,6 +4,7 @@
  */
 
 import { getEnvConfig } from './env';
+import { apiCache, CACHE_TTL } from './cache';
 
 const config = getEnvConfig();
 const BASE_URL = config.apiUrl.replace(/\/$/, "");
@@ -14,6 +15,44 @@ interface RequestOptions {
   body?: unknown;
   params?: Record<string, string | number | undefined>;
   cacheTtl?: number;
+}
+
+/**
+ * Structured API error with HTTP status code and user-friendly message.
+ * Thrown for both network failures and non-2xx responses.
+ *
+ * Usage:
+ *   try { await api.getStatistics() }
+ *   catch (e) {
+ *     if (e instanceof ApiError) {
+ *       console.log(e.status, e.message); // e.g. 404, "Market not found"
+ *     }
+ *   }
+ */
+export class ApiError extends Error {
+  /** HTTP status code, or 0 for network/connection failures. */
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+
+  /** True for client errors (4xx). */
+  get isClientError(): boolean {
+    return this.status >= 400 && this.status < 500;
+  }
+
+  /** True for server errors (5xx). */
+  get isServerError(): boolean {
+    return this.status >= 500;
+  }
+
+  /** True for network/connection failures (status 0). */
+  get isNetworkError(): boolean {
+    return this.status === 0;
+  }
 }
 
 async function request<T>(
@@ -40,15 +79,23 @@ async function request<T>(
     }
   }
 
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+  } catch (networkErr) {
+    // Network failure (offline, DNS error, CORS, timeout, etc.)
+    const msg = networkErr instanceof Error ? networkErr.message : "Network request failed";
+    throw new ApiError(`Unable to reach the server. Please check your connection. (${msg})`, 0);
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err?.message ?? `HTTP ${res.status}`);
+    const message = err?.message ?? `HTTP ${res.status}`;
+    throw new ApiError(message, res.status);
   }
 
   // 204 / empty body

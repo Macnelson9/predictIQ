@@ -15,3 +15,8 @@ pub mod oracles;
 pub mod resolution;
 pub mod sac;
 pub mod voting;
+
+#[cfg(test)]
+mod disputes_weight_test;
+#[cfg(test)]
+mod markets_conditional_test;
