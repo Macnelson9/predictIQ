@@ -111,6 +111,8 @@ pub enum ConfigKey {
     BaseFee,
     CircuitBreakerState,
     CreationDeposit,
+    CreationFee,
+    ProtocolTreasury,
     GuardianSet,
     PendingUpgrade,
     UpgradeVotes,

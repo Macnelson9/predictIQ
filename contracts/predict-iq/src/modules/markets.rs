@@ -24,6 +24,28 @@ pub fn create_market(
 ) -> Result<u64, ErrorCode> {
     creator.require_auth();
 
+    // Issue #512: Check circuit breaker - prevent market creation during emergency pause
+    crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
+
+    // Issue #510: Validate market deadlines
+    let current_time = e.ledger().timestamp();
+    
+    // Betting deadline must be in the future
+    if deadline <= current_time {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+    
+    // Resolution deadline must be after betting deadline
+    if resolution_deadline <= deadline {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+    
+    // Enforce minimum deadline gap (24 hours = 86400 seconds)
+    const MIN_DEADLINE_GAP: u64 = 86400;
+    if resolution_deadline - deadline < MIN_DEADLINE_GAP {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+
     // Gas optimization: Limit number of outcomes to prevent excessive iteration
     if options.len() > crate::types::MAX_OUTCOMES_PER_MARKET {
         return Err(ErrorCode::TooManyOutcomes);
@@ -83,6 +105,7 @@ pub fn create_market(
     }
 
     let creation_deposit = get_creation_deposit(e);
+    let creation_fee = get_creation_fee(e);
 
     // Check if deposit is required based on reputation
     let deposit_required = !matches!(
@@ -90,15 +113,31 @@ pub fn create_market(
         CreatorReputation::Pro | CreatorReputation::Institutional
     );
 
+    let token_client = token::Client::new(e, &native_token);
+    let balance = token_client.balance(&creator);
+
+    // Calculate total amount needed (deposit + fee)
+    let total_required = if deposit_required {
+        creation_deposit
+    } else {
+        0
+    } + creation_fee;
+
+    if total_required > 0 && balance < total_required {
+        return Err(ErrorCode::InsufficientDeposit);
+    }
+
+    // Collect creation fee to protocol treasury
+    if creation_fee > 0 {
+        let treasury = get_protocol_treasury(e);
+        token_client.transfer(&creator, &treasury, &creation_fee);
+        
+        // Emit fee collection event
+        crate::modules::events::emit_fee_collected(e, 0, treasury, creation_fee);
+    }
+
+    // Lock deposit if required
     if deposit_required && creation_deposit > 0 {
-        let token_client = token::Client::new(e, &native_token);
-        let balance = token_client.balance(&creator);
-
-        if balance < creation_deposit {
-            return Err(ErrorCode::InsufficientDeposit);
-        }
-
-        // Lock deposit
         token_client.transfer(&creator, &e.current_contract_address(), &creation_deposit);
     }
 
@@ -234,6 +273,40 @@ pub fn set_creation_deposit(e: &Env, amount: i128) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::CreationDeposit, &amount);
+    Ok(())
+}
+
+/// Issue #507: Get market creation fee (configurable by admin)
+pub fn get_creation_fee(e: &Env) -> i128 {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::CreationFee)
+        .unwrap_or(0)
+}
+
+/// Issue #507: Set market creation fee (admin only)
+pub fn set_creation_fee(e: &Env, amount: i128) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::CreationFee, &amount);
+    Ok(())
+}
+
+/// Issue #507: Get protocol treasury address
+pub fn get_protocol_treasury(e: &Env) -> Address {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::ProtocolTreasury)
+        .unwrap_or_else(|| e.current_contract_address())
+}
+
+/// Issue #507: Set protocol treasury address (admin only)
+pub fn set_protocol_treasury(e: &Env, treasury: Address) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::ProtocolTreasury, &treasury);
     Ok(())
 }
 

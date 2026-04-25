@@ -52,5 +52,5 @@ pub enum ErrorCode {
     InvalidAmount = 145,
     GovernanceTokenNotSet = 146,
     MarketNotResolved = 147,
-    InsufficientReputation = 148,
+    InvalidDeadline = 148,
 }

@@ -39,9 +39,12 @@ impl Metrics {
         let request_latency = HistogramVec::new(
             prometheus::HistogramOpts::new(
                 "http_request_duration_seconds",
-                "HTTP latency in seconds",
-            ),
-            &["endpoint"],
+                "HTTP request latency in seconds",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+            &["route", "status_code"],
         )
         .context("request_latency metric")?;
 
@@ -96,9 +99,9 @@ impl Metrics {
         }
     }
 
-    pub fn observe_request(&self, endpoint: &str, duration: Duration) {
+    pub fn observe_request(&self, route: &str, status_code: &str, duration: Duration) {
         self.request_latency
-            .with_label_values(&[endpoint])
+            .with_label_values(&[route, status_code])
             .observe(duration.as_secs_f64());
     }
 

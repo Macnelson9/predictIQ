@@ -9,6 +9,22 @@ use soroban_sdk::{symbol_short, Address, Env};
 ///
 /// This standardization ensures external indexers can perfectly reconstruct
 /// market states by following a consistent event schema.
+///
+/// EVENT SCHEMA VERSION: 1.0
+/// Last Updated: 2026-04-25
+///
+/// Indexer Integration Guide:
+/// 1. Subscribe to contract events using market_id as primary filter
+/// 2. Process events in ledger order to maintain state consistency
+/// 3. For event replay: query all events for a market_id and replay sequentially
+/// 4. All timestamps are in Unix seconds (ledger.timestamp())
+/// 5. All amounts are in stroops (1 XLM = 10^7 stroops)
+///
+/// Event Replay Support:
+/// - All events are immutable once emitted
+/// - Events include sufficient context for state reconstruction
+/// - market_id is always present for efficient indexing
+/// - Timestamps enable temporal queries
 
 pub fn emit_market_created(
     e: &Env,
@@ -143,6 +159,11 @@ pub fn emit_referral_claimed(e: &Env, market_id: u64, claimer: Address, amount: 
         .publish((symbol_short!("ref_claim"), market_id, claimer), amount);
 }
 
+pub fn emit_referral_distribution(e: &Env, market_id: u64, token: Address) {
+    e.events()
+        .publish((symbol_short!("ref_dist"), market_id, token), ());
+}
+
 pub fn emit_circuit_breaker_auto(e: &Env, contract_address: Address, error_count: u32) {
     e.events().publish(
         (symbol_short!("cb_auto"), 0u64, contract_address),
@@ -226,5 +247,20 @@ pub fn emit_upgrade_rejected(e: &Env, wasm_hash: soroban_sdk::BytesN<32>) {
     e.events().publish(
         (symbol_short!("upg_rej"),),
         wasm_hash,
+    );
+}
+
+/// Issue #506: Emit MarketStateChanged event for indexing
+/// Includes all fields needed for off-chain state reconstruction
+pub fn emit_market_state_changed(
+    e: &Env,
+    market_id: u64,
+    old_status: soroban_sdk::String,
+    new_status: soroban_sdk::String,
+    timestamp: u64,
+) {
+    e.events().publish(
+        (symbol_short!("mkt_state"), market_id),
+        (old_status, new_status, timestamp),
     );
 }
