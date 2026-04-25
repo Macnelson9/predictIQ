@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::ValidateEmail;
 
-use crate::{blockchain::HealthStatus, cache::keys, email::webhook::sendgrid_webhook_handler, pagination::{PaginatedResponse, PaginationQuery}, AppState};
+use crate::{blockchain::HealthStatus, cache::keys, db::DbError, email::webhook::sendgrid_webhook_handler, pagination::{PaginatedResponse, PaginationQuery}, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct ApiError {
     pub code: &'static str,
     pub message: String,
+    #[serde(skip)]
+    pub status: StatusCode,
 }
 
 impl ApiError {
@@ -27,6 +29,7 @@ impl ApiError {
         Self {
             code: "INTERNAL_ERROR",
             message: err.to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -34,6 +37,7 @@ impl ApiError {
         Self {
             code: "BAD_REQUEST",
             message: message.into(),
+            status: StatusCode::BAD_REQUEST,
         }
     }
 
@@ -41,6 +45,7 @@ impl ApiError {
         Self {
             code: "NOT_FOUND",
             message: message.into(),
+            status: StatusCode::NOT_FOUND,
         }
     }
 
@@ -48,6 +53,7 @@ impl ApiError {
         Self {
             code: "CONFLICT",
             message: message.into(),
+            status: StatusCode::CONFLICT,
         }
     }
 
@@ -55,17 +61,31 @@ impl ApiError {
         Self {
             code: "RATE_LIMITED",
             message: "Too many requests, please try again later.".to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+        }
+    }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: "SERVICE_UNAVAILABLE",
+            message: message.into(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(self)).into_response()
+        (self.status, Json(self)).into_response()
     }
 }
 
 fn into_api_error(err: anyhow::Error) -> ApiError {
+    if let Some(db_err) = err.downcast_ref::<DbError>() {
+        if matches!(db_err, DbError::Timeout) {
+            return ApiError::service_unavailable("database query timed out");
+        }
+    }
     ApiError::internal(err)
 }
 
@@ -691,7 +711,7 @@ pub async fn resolve_market(
     let map_err = |e: anyhow::Error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError { code: "INTERNAL_ERROR", message: e.to_string() }),
+            Json(ApiError { code: "INTERNAL_ERROR", message: e.to_string(), status: StatusCode::INTERNAL_SERVER_ERROR }),
         )
     };
 

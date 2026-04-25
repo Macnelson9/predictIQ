@@ -63,7 +63,7 @@ async fn test_email_queue_worker_graceful_shutdown() {
         .expect("Failed to connect to Redis");
     
     // Create a test database connection
-    let db = crate::db::Database::new(&config.database_url, cache.clone(), metrics)
+    let db = crate::db::Database::new(&config.database_url, cache.clone(), metrics, config.db_pool.query_timeout)
         .await
         .expect("Failed to connect to database");
     

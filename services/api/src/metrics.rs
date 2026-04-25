@@ -12,6 +12,7 @@ pub struct Metrics {
     request_latency: HistogramVec,
     rpc_errors: IntCounterVec,
     rpc_fallbacks: IntCounterVec,
+    db_timeouts: IntCounterVec,
 }
 
 impl Metrics {
@@ -63,12 +64,19 @@ impl Metrics {
         )
         .context("rpc_fallbacks metric")?;
 
+        let db_timeouts = IntCounterVec::new(
+            prometheus::Opts::new("db_timeouts_total", "DB queries that exceeded the timeout, by operation"),
+            &["operation"],
+        )
+        .context("db_timeouts metric")?;
+
         registry.register(Box::new(cache_hits.clone()))?;
         registry.register(Box::new(cache_misses.clone()))?;
         registry.register(Box::new(invalidations.clone()))?;
         registry.register(Box::new(request_latency.clone()))?;
         registry.register(Box::new(rpc_errors.clone()))?;
         registry.register(Box::new(rpc_fallbacks.clone()))?;
+        registry.register(Box::new(db_timeouts.clone()))?;
 
         Ok(Self {
             registry,
@@ -78,6 +86,7 @@ impl Metrics {
             request_latency,
             rpc_errors,
             rpc_fallbacks,
+            db_timeouts,
         })
     }
 
@@ -111,6 +120,10 @@ impl Metrics {
 
     pub fn observe_rpc_fallback(&self, endpoint: &str) {
         self.rpc_fallbacks.with_label_values(&[endpoint]).inc();
+    }
+
+    pub fn observe_db_timeout(&self, operation: &str) {
+        self.db_timeouts.with_label_values(&[operation]).inc();
     }
 
     pub fn observe_tx_eviction(&self, count: u64) {
