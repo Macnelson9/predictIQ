@@ -1,11 +1,12 @@
 use crate::errors::ErrorCode;
 use crate::types::OracleConfig;
-use soroban_sdk::{contracttype, symbol_short, Env};
+use soroban_sdk::{contracttype, symbol_short, Env, Map};
 
 #[contracttype]
 pub enum OracleData {
     Result(u64, u32),     // market_id -> outcome
     LastUpdate(u64, u64), // market_id -> timestamp
+    OracleResponses(u64), // market_id -> Map<oracle_index, outcome>
 }
 
 #[contracttype]
@@ -136,4 +137,74 @@ pub fn set_oracle_result(e: &Env, market_id: u64, outcome: u32) -> Result<(), Er
 
 pub fn verify_oracle_health(_e: &Env, config: &OracleConfig) -> bool {
     !config.feed_id.is_empty()
+}
+
+/// Issue #509: Record an oracle response for consensus validation
+pub fn record_oracle_response(
+    e: &Env,
+    market_id: u64,
+    oracle_index: u32,
+    outcome: u32,
+) -> Result<(), ErrorCode> {
+    let key = OracleData::OracleResponses(market_id);
+    let mut responses: Map<u32, u32> = e
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Map::new(e));
+
+    responses.set(oracle_index, outcome);
+    e.storage().persistent().set(&key, &responses);
+
+    Ok(())
+}
+
+/// Issue #509: Validate oracle consensus - requires min_responses confirmations
+pub fn validate_consensus(
+    e: &Env,
+    market_id: u64,
+    config: &OracleConfig,
+) -> Result<u32, ErrorCode> {
+    let min_responses = config.min_responses.unwrap_or(1);
+
+    let key = OracleData::OracleResponses(market_id);
+    let responses: Map<u32, u32> = e
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(ErrorCode::OracleFailure)?;
+
+    // Check if we have enough responses
+    if responses.len() < min_responses {
+        return Err(ErrorCode::OracleFailure);
+    }
+
+    // Count votes for each outcome
+    let mut outcome_votes: Map<u32, u32> = Map::new(e);
+    let mut i = 0u32;
+    while i < responses.len() {
+        if let Some(outcome) = responses.get(i) {
+            let votes = outcome_votes.get(outcome).unwrap_or(0);
+            outcome_votes.set(outcome, votes + 1);
+        }
+        i += 1;
+    }
+
+    // Find outcome with most votes (quorum)
+    let mut consensus_outcome: Option<u32> = None;
+    let mut max_votes = 0u32;
+    let mut i = 0u32;
+    while i < outcome_votes.len() {
+        if let Some(outcome) = outcome_votes.get(i) {
+            if let Some(votes) = outcome_votes.get(outcome) {
+                if votes > max_votes {
+                    max_votes = votes;
+                    consensus_outcome = Some(outcome);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    consensus_outcome.ok_or(ErrorCode::OracleFailure)
 }

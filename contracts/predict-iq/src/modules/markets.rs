@@ -24,6 +24,28 @@ pub fn create_market(
 ) -> Result<u64, ErrorCode> {
     creator.require_auth();
 
+    // Issue #512: Check circuit breaker - prevent market creation during emergency pause
+    crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
+
+    // Issue #510: Validate market deadlines
+    let current_time = e.ledger().timestamp();
+    
+    // Betting deadline must be in the future
+    if deadline <= current_time {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+    
+    // Resolution deadline must be after betting deadline
+    if resolution_deadline <= deadline {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+    
+    // Enforce minimum deadline gap (24 hours = 86400 seconds)
+    const MIN_DEADLINE_GAP: u64 = 86400;
+    if resolution_deadline - deadline < MIN_DEADLINE_GAP {
+        return Err(ErrorCode::InvalidDeadline);
+    }
+
     // Gas optimization: Limit number of outcomes to prevent excessive iteration
     if options.len() > crate::types::MAX_OUTCOMES_PER_MARKET {
         return Err(ErrorCode::TooManyOutcomes);
