@@ -97,6 +97,21 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Cleanup expired pending newsletter subscriptions hourly
+    let db_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let ttl = db_cleanup.config.newsletter_token_ttl_secs;
+            match db_cleanup.db.newsletter_delete_expired_pending(ttl).await {
+                Ok(n) if n > 0 => tracing::info!("[newsletter] cleaned up {n} expired pending subscriptions"),
+                Err(e) => tracing::warn!("[newsletter] cleanup error: {e}"),
+                _ => {}
+            }
+        }
+    });
+
     let state = Arc::new(AppState {
         config,
         cache: cache.clone(),
@@ -202,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/newsletter/unsubscribe",
-            axum::routing::delete(handlers::newsletter_unsubscribe),
+            get(handlers::newsletter_unsubscribe),
         )
         .route(
             "/api/v1/newsletter/gdpr/export",
