@@ -4,6 +4,7 @@ mod blockchain;
 mod cache;
 mod compression;
 mod config;
+mod correlation;
 mod db;
 mod email;
 mod handlers;
@@ -180,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/statistics", get(handlers::statistics))
         .route("/api/v1/markets/featured", get(handlers::featured_markets))
         .route("/api/v1/content", get(handlers::content))
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(versioning::versioning_middleware))
         .layer(middleware::from_fn(security::security_headers_middleware))
         .layer(middleware::from_fn(validation::request_validation_middleware))
@@ -212,6 +215,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/newsletter/gdpr/delete",
             axum::routing::delete(handlers::newsletter_gdpr_delete),
         )
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             idempotency::idempotency_middleware,
@@ -229,6 +234,8 @@ async fn main() -> anyhow::Result<()> {
             "/webhooks/sendgrid",
             post(handlers::sendgrid_webhook),
         )
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(security::security_headers_middleware))
         .with_state(state.clone());
 
@@ -286,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             audit_middleware::audit_logging_middleware,
         ))
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
