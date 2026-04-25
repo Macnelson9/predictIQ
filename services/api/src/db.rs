@@ -274,17 +274,37 @@ impl Database {
         Ok(())
     }
 
-    pub async fn newsletter_confirm_by_token(&self, token: &str) -> anyhow::Result<bool> {
+    pub async fn newsletter_confirm_by_token(
+        &self,
+        token: &str,
+        token_ttl_secs: u64,
+    ) -> anyhow::Result<bool> {
         let result = sqlx::query(
             "UPDATE newsletter_subscribers
              SET confirmed = TRUE, confirmation_token = NULL, confirmed_at = NOW(), unsubscribed_at = NULL
-             WHERE confirmation_token = $1",
+             WHERE confirmation_token = $1
+               AND created_at > NOW() - ($2 || ' seconds')::INTERVAL",
         )
         .bind(token)
+        .bind(token_ttl_secs as i64)
         .execute(&self.pool)
         .await?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove pending (unconfirmed) subscriptions whose token has expired.
+    pub async fn newsletter_delete_expired_pending(&self, token_ttl_secs: u64) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM newsletter_subscribers
+             WHERE confirmed = FALSE
+               AND created_at <= NOW() - ($1 || ' seconds')::INTERVAL",
+        )
+        .bind(token_ttl_secs as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 
     pub async fn newsletter_unsubscribe(&self, normalized_email: &str) -> anyhow::Result<bool> {
