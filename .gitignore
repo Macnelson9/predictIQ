@@ -34,3 +34,6 @@ Cargo.lock
 
 # Performance baselines (stored per branch)
 .performance-baselines/
+
+# Gas benchmark baselines (stored per branch)
+contracts/predict-iq/.gas-benchmarks/
