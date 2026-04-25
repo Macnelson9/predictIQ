@@ -54,6 +54,7 @@ pub fn create_market(
 
     let reputation = get_creator_reputation(e, &creator);
     let creation_deposit = get_creation_deposit(e);
+    let creation_fee = get_creation_fee(e);
 
     // Check if deposit is required based on reputation
     let deposit_required = !matches!(
@@ -61,15 +62,31 @@ pub fn create_market(
         CreatorReputation::Pro | CreatorReputation::Institutional
     );
 
+    let token_client = token::Client::new(e, &native_token);
+    let balance = token_client.balance(&creator);
+
+    // Calculate total amount needed (deposit + fee)
+    let total_required = if deposit_required {
+        creation_deposit
+    } else {
+        0
+    } + creation_fee;
+
+    if total_required > 0 && balance < total_required {
+        return Err(ErrorCode::InsufficientDeposit);
+    }
+
+    // Collect creation fee to protocol treasury
+    if creation_fee > 0 {
+        let treasury = get_protocol_treasury(e);
+        token_client.transfer(&creator, &treasury, &creation_fee);
+        
+        // Emit fee collection event
+        crate::modules::events::emit_fee_collected(e, 0, treasury, creation_fee);
+    }
+
+    // Lock deposit if required
     if deposit_required && creation_deposit > 0 {
-        let token_client = token::Client::new(e, &native_token);
-        let balance = token_client.balance(&creator);
-
-        if balance < creation_deposit {
-            return Err(ErrorCode::InsufficientDeposit);
-        }
-
-        // Lock deposit
         token_client.transfer(&creator, &e.current_contract_address(), &creation_deposit);
     }
 
@@ -205,6 +222,40 @@ pub fn set_creation_deposit(e: &Env, amount: i128) -> Result<(), ErrorCode> {
     e.storage()
         .persistent()
         .set(&ConfigKey::CreationDeposit, &amount);
+    Ok(())
+}
+
+/// Issue #507: Get market creation fee (configurable by admin)
+pub fn get_creation_fee(e: &Env) -> i128 {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::CreationFee)
+        .unwrap_or(0)
+}
+
+/// Issue #507: Set market creation fee (admin only)
+pub fn set_creation_fee(e: &Env, amount: i128) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::CreationFee, &amount);
+    Ok(())
+}
+
+/// Issue #507: Get protocol treasury address
+pub fn get_protocol_treasury(e: &Env) -> Address {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::ProtocolTreasury)
+        .unwrap_or_else(|| e.current_contract_address())
+}
+
+/// Issue #507: Set protocol treasury address (admin only)
+pub fn set_protocol_treasury(e: &Env, treasury: Address) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::ProtocolTreasury, &treasury);
     Ok(())
 }
 

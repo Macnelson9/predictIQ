@@ -163,6 +163,13 @@ impl PredictIQ {
         crate::modules::oracles::set_oracle_result(&e, market_id, outcome)
     }
 
+    /// Issue #508: Validate oracle staleness for a market
+    pub fn validate_oracle_staleness(e: Env, market_id: u64) -> Result<(), ErrorCode> {
+        let market = crate::modules::markets::get_market(&e, market_id)
+            .ok_or(ErrorCode::MarketNotFound)?;
+        crate::modules::oracles::validate_oracle_staleness(&e, market_id, &market.oracle_config)
+    }
+
     pub fn resolve_market(e: Env, market_id: u64, winning_outcome: u32) -> Result<(), ErrorCode> {
         crate::modules::admin::require_admin(&e)?;
         crate::modules::disputes::resolve_market(&e, market_id, winning_outcome)
@@ -224,6 +231,26 @@ impl PredictIQ {
         native_token: Address,
     ) -> Result<(), ErrorCode> {
         crate::modules::markets::release_creation_deposit(&e, market_id, native_token)
+    }
+
+    /// Issue #507: Set market creation fee (admin only)
+    pub fn set_creation_fee(e: Env, amount: i128) -> Result<(), ErrorCode> {
+        crate::modules::markets::set_creation_fee(&e, amount)
+    }
+
+    /// Issue #507: Get market creation fee
+    pub fn get_creation_fee(e: Env) -> i128 {
+        crate::modules::markets::get_creation_fee(&e)
+    }
+
+    /// Issue #507: Set protocol treasury address (admin only)
+    pub fn set_protocol_treasury(e: Env, treasury: Address) -> Result<(), ErrorCode> {
+        crate::modules::markets::set_protocol_treasury(&e, treasury)
+    }
+
+    /// Issue #507: Get protocol treasury address
+    pub fn get_protocol_treasury(e: Env) -> Address {
+        crate::modules::markets::get_protocol_treasury(&e)
     }
 
     // Governance and Upgrade Functions

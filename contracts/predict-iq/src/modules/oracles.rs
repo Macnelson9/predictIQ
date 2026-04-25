@@ -27,7 +27,7 @@ pub fn validate_price(e: &Env, price: &PythPrice, config: &OracleConfig) -> Resu
     let current_time = e.ledger().timestamp() as i64;
     let age = current_time - price.publish_time;
 
-    // Check freshness
+    // Check freshness - Issue #508: Enforce staleness validation
     if age > config.max_staleness_seconds as i64 {
         return Err(ErrorCode::StalePrice);
     }
@@ -45,6 +45,32 @@ pub fn validate_price(e: &Env, price: &PythPrice, config: &OracleConfig) -> Resu
     }
 
     Ok(())
+}
+
+/// Issue #508: Validate oracle staleness before resolution
+pub fn validate_oracle_staleness(
+    e: &Env,
+    market_id: u64,
+    config: &OracleConfig,
+) -> Result<(), ErrorCode> {
+    let last_update = e
+        .storage()
+        .persistent()
+        .get::<_, u64>(&OracleData::LastUpdate(market_id, 0));
+
+    if let Some(update_time) = last_update {
+        let current_time = e.ledger().timestamp();
+        let age = current_time - update_time;
+
+        // Check if oracle data is stale
+        if age > config.max_staleness_seconds {
+            return Err(ErrorCode::StalePrice);
+        }
+        Ok(())
+    } else {
+        // No oracle data available
+        Err(ErrorCode::OracleFailure)
+    }
 }
 
 pub fn resolve_with_pyth(e: &Env, market_id: u64, config: &OracleConfig) -> Result<u32, ErrorCode> {
