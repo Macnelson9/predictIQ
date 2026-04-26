@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: predictiq-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+      - "14250:14250"  # Jaeger gRPC
+      - "14268:14268"  # Jaeger HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - LOG_LEVEL=info
+    networks:
+      - predictiq-tracing
+
+  zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: predictiq-zipkin
+    ports:
+      - "9411:9411"    # Zipkin UI and API
+    networks:
+      - predictiq-tracing
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: predictiq-otel-collector
+    command: ["--config=/etc/otel-collector-config.yml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel-collector-config.yml
+    ports:
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+      - "8888:8888"    # Prometheus metrics
+      - "13133:13133"  # Health check
+    depends_on:
+      - jaeger
+      - zipkin
+    networks:
+      - predictiq-tracing
+
+networks:
+  predictiq-tracing:
+    driver: bridge

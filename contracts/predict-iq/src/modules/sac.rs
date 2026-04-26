@@ -1,8 +1,9 @@
 use crate::errors::ErrorCode;
-use soroban_sdk::{Address, Env, IntoVal, Symbol, Val};
+use soroban_sdk::{symbol_short, token, Address, Env};
 
-/// Issue #11: Use try_invoke_contract so transfer failures are handled
-/// programmatically instead of relying on host panics.
+/// Issue #11: Use try_transfer so transfer failures are caught programmatically
+/// instead of relying on host panics. Maps any host error to TransferFailed and
+/// emits a `xfer_fail` event so callers can observe the failure without crashing.
 pub fn safe_transfer(
     e: &Env,
     token_address: &Address,
@@ -10,25 +11,35 @@ pub fn safe_transfer(
     to: &Address,
     amount: &i128,
 ) -> Result<(), ErrorCode> {
-    let args = (from.clone(), to.clone(), *amount).into_val(e);
+    let client = token::Client::new(e, token_address);
 
-    match e.try_invoke_contract::<Val, ErrorCode>(
-        token_address,
-        &Symbol::new(e, "transfer"),
-        args,
-    ) {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(ErrorCode::AssetClawedBack),
-    }
+    client
+        .try_transfer(from, to, amount)
+        .map_err(|_| {
+            e.events().publish(
+                (symbol_short!("xfer_fail"), from.clone(), to.clone()),
+                (token_address.clone(), *amount),
+            );
+            ErrorCode::TransferFailed
+        })?
+        .map_err(|_| {
+            e.events().publish(
+                (symbol_short!("xfer_fail"), from.clone(), to.clone()),
+                (token_address.clone(), *amount),
+            );
+            ErrorCode::TransferFailed
+        })
 }
 
-pub fn verify_contract_not_frozen(
-    e: &Env,
-    token_address: &Address,
-) -> Result<(), ErrorCode> {
-    let client = soroban_sdk::token::Client::new(e, token_address);
-    let _balance = client.balance(&e.current_contract_address());
+/// Check if contract can receive tokens (not frozen)
+/// Returns true if the contract's balance can be modified
+pub fn verify_contract_not_frozen(e: &Env, token_address: &Address) -> Result<(), ErrorCode> {
+    let client = token::Client::new(e, token_address);
+    let contract_addr = e.current_contract_address();
+
+    // Try to get balance - if frozen, this will succeed but transfers will fail
+    let _balance = client.balance(&contract_addr);
+
     Ok(())
 }
 

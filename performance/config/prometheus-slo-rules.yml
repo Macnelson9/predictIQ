@@ -1,0 +1,173 @@
+groups:
+  - name: slo_recording_rules
+    interval: 30s
+    rules:
+      # API Availability SLO
+      - record: slo:api_availability:success_rate
+        expr: |
+          sum(rate(http_requests_total{status=~"2..|3.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m]))
+          * 100
+
+      - record: slo:api_availability:error_budget_remaining
+        expr: |
+          (1 - (
+            (100 - slo:api_availability:success_rate) 
+            / 
+            (100 - 99.9)
+          )) * 100
+
+      # API Latency P95 SLO
+      - record: slo:api_latency_p95:success_rate
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) <= 0.2
+
+      # API Latency P99 SLO
+      - record: slo:api_latency_p99:success_rate
+        expr: |
+          histogram_quantile(0.99, 
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) <= 0.5
+
+      # Database Query Latency SLO
+      - record: slo:db_query_latency:success_rate
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(db_query_duration_seconds_bucket[5m])) by (le)
+          ) <= 0.05
+
+      # Cache Availability SLO
+      - record: slo:cache_availability:success_rate
+        expr: |
+          sum(rate(redis_commands_total{status="success"}[5m]))
+          /
+          sum(rate(redis_commands_total[5m]))
+          * 100
+
+      # Burn Rate Calculations (1h window)
+      - record: slo:api_availability:burn_rate_1h
+        expr: |
+          (100 - slo:api_availability:success_rate)
+          /
+          (100 - 99.9)
+          * 30 * 24
+
+      - record: slo:api_availability:burn_rate_6h
+        expr: |
+          (100 - 
+            sum(rate(http_requests_total{status=~"2..|3.."}[6h]))
+            /
+            sum(rate(http_requests_total[6h]))
+            * 100
+          )
+          /
+          (100 - 99.9)
+          * 30 * 24
+
+      - record: slo:api_availability:burn_rate_24h
+        expr: |
+          (100 - 
+            sum(rate(http_requests_total{status=~"2..|3.."}[24h]))
+            /
+            sum(rate(http_requests_total[24h]))
+            * 100
+          )
+          /
+          (100 - 99.9)
+          * 30 * 24
+
+  - name: slo_alerting_rules
+    interval: 30s
+    rules:
+      # Fast Burn Alert (exhausts budget in 2 days)
+      - alert: SLOFastBurn
+        expr: |
+          slo:api_availability:burn_rate_1h > 14.4
+          and
+          slo:api_availability:burn_rate_6h > 14.4
+        for: 5m
+        labels:
+          severity: critical
+          slo: api_availability
+        annotations:
+          summary: "SLO fast burn detected for API availability"
+          description: "Error budget will be exhausted in 2 days at current rate. Burn rate: {{ $value }}x"
+          runbook_url: "https://docs.predictiq.com/runbooks/slo-fast-burn"
+
+      # Slow Burn Alert (exhausts budget in 5 days)
+      - alert: SLOSlowBurn
+        expr: |
+          slo:api_availability:burn_rate_6h > 6.0
+          and
+          slo:api_availability:burn_rate_24h > 6.0
+        for: 15m
+        labels:
+          severity: warning
+          slo: api_availability
+        annotations:
+          summary: "SLO slow burn detected for API availability"
+          description: "Error budget will be exhausted in 5 days at current rate. Burn rate: {{ $value }}x"
+          runbook_url: "https://docs.predictiq.com/runbooks/slo-slow-burn"
+
+      # Error Budget Exhausted
+      - alert: SLOErrorBudgetExhausted
+        expr: slo:api_availability:error_budget_remaining <= 0
+        for: 5m
+        labels:
+          severity: critical
+          slo: api_availability
+        annotations:
+          summary: "SLO error budget exhausted for API availability"
+          description: "Error budget is completely exhausted. Freeze all deployments and focus on reliability."
+          runbook_url: "https://docs.predictiq.com/runbooks/error-budget-exhausted"
+
+      # Error Budget Low Warning
+      - alert: SLOErrorBudgetLow
+        expr: slo:api_availability:error_budget_remaining < 25
+        for: 15m
+        labels:
+          severity: warning
+          slo: api_availability
+        annotations:
+          summary: "SLO error budget low for API availability"
+          description: "Error budget remaining: {{ $value }}%. Consider freezing non-critical deployments."
+          runbook_url: "https://docs.predictiq.com/runbooks/error-budget-low"
+
+      # Latency SLO Violation
+      - alert: SLOLatencyViolation
+        expr: slo:api_latency_p95:success_rate < 95
+        for: 10m
+        labels:
+          severity: warning
+          slo: api_latency_p95
+        annotations:
+          summary: "API latency P95 SLO violation"
+          description: "P95 latency exceeds 200ms target. Current compliance: {{ $value }}%"
+          runbook_url: "https://docs.predictiq.com/runbooks/latency-slo-violation"
+
+      # Database Query Latency SLO Violation
+      - alert: SLODatabaseLatencyViolation
+        expr: slo:db_query_latency:success_rate < 95
+        for: 10m
+        labels:
+          severity: warning
+          slo: db_query_latency
+        annotations:
+          summary: "Database query latency SLO violation"
+          description: "P95 query latency exceeds 50ms target. Current compliance: {{ $value }}%"
+          runbook_url: "https://docs.predictiq.com/runbooks/db-latency-slo-violation"
+
+      # Cache Availability SLO Violation
+      - alert: SLOCacheAvailabilityViolation
+        expr: slo:cache_availability:success_rate < 99.95
+        for: 5m
+        labels:
+          severity: critical
+          slo: cache_availability
+        annotations:
+          summary: "Cache availability SLO violation"
+          description: "Redis cache availability below 99.95% target. Current: {{ $value }}%"
+          runbook_url: "https://docs.predictiq.com/runbooks/cache-availability-slo-violation"

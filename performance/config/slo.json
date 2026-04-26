@@ -1,0 +1,125 @@
+{
+  "service_level_objectives": {
+    "api_availability": {
+      "description": "API service availability",
+      "target": 99.9,
+      "measurement_window": "30d",
+      "error_budget_percent": 0.1,
+      "calculation": "successful_requests / total_requests * 100",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0,
+        "burn_rate_24h": 3.0
+      }
+    },
+    "api_latency_p95": {
+      "description": "95th percentile API response time",
+      "target_ms": 200,
+      "measurement_window": "30d",
+      "error_budget_percent": 5,
+      "calculation": "percentage of requests with latency <= 200ms",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0,
+        "burn_rate_24h": 3.0
+      }
+    },
+    "api_latency_p99": {
+      "description": "99th percentile API response time",
+      "target_ms": 500,
+      "measurement_window": "30d",
+      "error_budget_percent": 1,
+      "calculation": "percentage of requests with latency <= 500ms",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0,
+        "burn_rate_24h": 3.0
+      }
+    },
+    "blockchain_sync_latency": {
+      "description": "Time to sync blockchain events",
+      "target_seconds": 10,
+      "measurement_window": "7d",
+      "error_budget_percent": 5,
+      "calculation": "percentage of sync operations completing within 10s",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0
+      }
+    },
+    "database_query_latency": {
+      "description": "95th percentile database query time",
+      "target_ms": 50,
+      "measurement_window": "7d",
+      "error_budget_percent": 5,
+      "calculation": "percentage of queries with latency <= 50ms",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0
+      }
+    },
+    "cache_availability": {
+      "description": "Redis cache availability",
+      "target": 99.95,
+      "measurement_window": "30d",
+      "error_budget_percent": 0.05,
+      "calculation": "successful_cache_operations / total_cache_operations * 100",
+      "alert_thresholds": {
+        "burn_rate_1h": 14.4,
+        "burn_rate_6h": 6.0
+      }
+    },
+    "email_delivery_success": {
+      "description": "Email delivery success rate",
+      "target": 99.0,
+      "measurement_window": "30d",
+      "error_budget_percent": 1.0,
+      "calculation": "delivered_emails / sent_emails * 100",
+      "alert_thresholds": {
+        "burn_rate_6h": 6.0,
+        "burn_rate_24h": 3.0
+      }
+    }
+  },
+  "error_budget_policy": {
+    "description": "Actions to take when error budget is exhausted",
+    "budget_remaining_thresholds": {
+      "100": "Normal operations - all features enabled",
+      "50": "Warning - review recent changes and incidents",
+      "25": "Alert - freeze non-critical feature deployments",
+      "10": "Critical - freeze all deployments, focus on reliability",
+      "0": "Emergency - rollback recent changes, incident response"
+    },
+    "budget_reset": "monthly",
+    "budget_calculation": "error_budget_percent * measurement_window"
+  },
+  "burn_rate_alerts": {
+    "description": "Multi-window multi-burn-rate alerting",
+    "fast_burn": {
+      "short_window": "1h",
+      "long_window": "6h",
+      "burn_rate_threshold": 14.4,
+      "severity": "critical",
+      "description": "Exhausts 30-day budget in 2 days"
+    },
+    "slow_burn": {
+      "short_window": "6h",
+      "long_window": "24h",
+      "burn_rate_threshold": 6.0,
+      "severity": "warning",
+      "description": "Exhausts 30-day budget in 5 days"
+    }
+  },
+  "reporting": {
+    "frequency": "weekly",
+    "recipients": ["sre-team@predictiq.com", "engineering@predictiq.com"],
+    "metrics": [
+      "slo_compliance_percentage",
+      "error_budget_remaining",
+      "error_budget_burn_rate",
+      "incidents_count",
+      "mttr_average"
+    ],
+    "dashboard_url": "https://grafana.predictiq.com/d/slo-dashboard"
+  }
+}

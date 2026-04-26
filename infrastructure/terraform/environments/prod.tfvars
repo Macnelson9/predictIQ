@@ -1,0 +1,11 @@
+environment         = "prod"
+aws_region          = "us-east-1"
+vpc_cidr_block      = "10.2.0.0/16"
+db_instance_class   = "db.t3.medium"
+allocated_storage   = 100
+backup_retention_days = 30
+redis_node_type     = "cache.t3.medium"
+redis_num_nodes     = 3
+api_desired_count   = 3
+api_cpu             = 1024
+api_memory          = 2048

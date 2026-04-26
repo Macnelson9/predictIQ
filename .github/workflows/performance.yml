@@ -7,7 +7,7 @@ on:
     branches: [main]
   schedule:
     # Run nightly at 2 AM UTC
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 env:
@@ -17,7 +17,7 @@ jobs:
   backend-performance:
     name: Backend Performance Tests
     runs-on: ubuntu-latest
-    
+
     services:
       postgres:
         image: postgres:15
@@ -31,7 +31,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       redis:
         image: redis:7-alpine
         options: >-
@@ -41,17 +41,17 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
-      
+
       - name: Cache Rust dependencies
         uses: actions/cache@v3
         with:
@@ -62,11 +62,11 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
       - name: Build API service
         working-directory: services/api
         run: cargo build --release
-      
+
       - name: Run database migrations
         working-directory: services/api
         env:
@@ -74,7 +74,7 @@ jobs:
         run: |
           cargo install sqlx-cli --no-default-features --features postgres
           sqlx migrate run
-      
+
       - name: Start API server
         working-directory: services/api
         env:
@@ -85,11 +85,11 @@ jobs:
           cargo run --release &
           echo $! > api.pid
           sleep 10
-      
+
       - name: Wait for API to be ready
         run: |
           timeout 30 bash -c 'until curl -f http://localhost:8080/health; do sleep 1; done'
-      
+
       - name: Install k6
         run: |
           sudo gpg -k
@@ -97,46 +97,52 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
           sudo apt-get update
           sudo apt-get install k6
-      
+
       - name: Run smoke tests
         working-directory: performance
         env:
           API_URL: http://localhost:8080
         run: k6 run --out json=backend/reports/smoke-test-raw.json backend/k6/smoke-test.js
-      
+
       - name: Run load tests
         if: github.event_name != 'pull_request'
         working-directory: performance
         env:
           API_URL: http://localhost:8080
         run: k6 run --out json=backend/reports/load-test-raw.json backend/k6/load-test.js
-      
+
       - name: Run cache tests
         working-directory: performance
         env:
           API_URL: http://localhost:8080
         run: k6 run --out json=backend/reports/cache-test-raw.json backend/k6/cache-test.js
-      
+
+      - name: Run blockchain data endpoints load test
+        working-directory: performance
+        env:
+          API_URL: http://localhost:8080
+        run: k6 run --out json=backend/reports/blockchain-load-test-raw.json backend/k6/blockchain-load-test.js
+
       - name: Run rate limit tests
         working-directory: performance
         env:
           API_URL: http://localhost:8080
         run: k6 run --out json=backend/reports/rate-limit-test-raw.json backend/k6/rate-limit-test.js
-      
+
       - name: Run stress tests (nightly only)
         if: github.event_name == 'schedule'
         working-directory: performance
         env:
           API_URL: http://localhost:8080
         run: k6 run --out json=backend/reports/stress-test-raw.json backend/k6/stress-test.js
-      
+
       - name: Generate performance report
         if: always()
         working-directory: performance
         run: |
           npm install
           node scripts/generate-report.js
-      
+
       - name: Upload performance reports
         if: always()
         uses: actions/upload-artifact@v3
@@ -144,7 +150,7 @@ jobs:
           name: performance-reports
           path: performance/backend/reports/
           retention-days: 30
-      
+
       - name: Check performance thresholds
         if: always()
         working-directory: performance
@@ -172,7 +178,7 @@ jobs:
               console.log('✅ All performance thresholds met');
             "
           fi
-      
+
       - name: Comment PR with results
         if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v6
@@ -180,7 +186,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'performance/backend/reports/smoke-test-summary.json';
-            
+
             if (fs.existsSync(path)) {
               const data = JSON.parse(fs.readFileSync(path, 'utf8'));
               const metrics = data.metrics;
@@ -205,7 +211,7 @@ jobs:
                 body: comment
               });
             }
-      
+
       - name: Stop API server
         if: always()
         run: |
@@ -216,17 +222,17 @@ jobs:
   contract-benchmarks:
     name: Smart Contract Benchmarks
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
-      
+
       - name: Cache Rust dependencies
         uses: actions/cache@v3
         with:
@@ -237,22 +243,22 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
       - name: Install Soroban CLI
         run: cargo install --locked soroban-cli --version 20.0.0
-      
+
       - name: Run contract benchmarks
         working-directory: contracts/predict-iq
         run: |
           cargo bench --bench gas_benchmark -- --save-baseline main
-      
+
       - name: Upload benchmark results
         uses: actions/upload-artifact@v3
         with:
           name: contract-benchmarks
           path: contracts/predict-iq/target/criterion/
           retention-days: 30
-      
+
       - name: Compare with baseline
         if: github.event_name == 'pull_request'
         working-directory: contracts/predict-iq
@@ -266,51 +272,105 @@ jobs:
     runs-on: ubuntu-latest
     needs: [backend-performance]
     if: github.event_name == 'pull_request'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Download current results
         uses: actions/download-artifact@v3
         with:
           name: performance-reports
-          path: current-results/
-      
-      - name: Download baseline results
+          path: performance/backend/reports/
+
+      - name: Checkout baseline branch
         continue-on-error: true
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          workflow: performance.yml
-          branch: main
-          name: performance-reports
-          path: baseline-results/
-      
-      - name: Compare results
         run: |
-          if [ -f baseline-results/load-test-summary.json ] && [ -f current-results/load-test-summary.json ]; then
-            node -e "
-              const baseline = require('./baseline-results/load-test-summary.json');
-              const current = require('./current-results/load-test-summary.json');
+          git fetch origin main:main
+          git show main:.performance-baselines/ > /dev/null 2>&1 && \
+            git show main:.performance-baselines/ | tar -xz -C . || \
+            echo "No baselines found on main branch"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Compare results against baseline
+        working-directory: performance
+        run: |
+          node scripts/compare-results.js --branch main --threshold 10
+
+      - name: Upload regression report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: regression-report
+          path: performance/backend/reports/regression-report.md
+          retention-days: 30
+
+      - name: Comment PR with regression report
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'performance/backend/reports/regression-report.md';
+
+            if (fs.existsSync(path)) {
+              const report = fs.readFileSync(path, 'utf8');
               
-              const baselineP95 = baseline.metrics.http_req_duration.values['p(95)'];
-              const currentP95 = current.metrics.http_req_duration.values['p(95)'];
-              const regression = ((currentP95 - baselineP95) / baselineP95) * 100;
-              
-              console.log('Performance Comparison:');
-              console.log('Baseline P95:', baselineP95.toFixed(2), 'ms');
-              console.log('Current P95:', currentP95.toFixed(2), 'ms');
-              console.log('Change:', regression.toFixed(2), '%');
-              
-              if (regression > 10) {
-                console.error('⚠️ Performance regression detected: +' + regression.toFixed(2) + '%');
-                process.exit(1);
-              }
-              
-              console.log('✅ No significant performance regression');
-            "
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
+
+      - name: Fail if regression detected
+        if: failure()
+        run: |
+          echo "❌ Performance regression detected. Check the PR comment for details."
+          exit 1
+
+  save-performance-baseline:
+    name: Save Performance Baseline
+    runs-on: ubuntu-latest
+    needs: [backend-performance]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download performance results
+        uses: actions/download-artifact@v3
+        with:
+          name: performance-reports
+          path: performance/backend/reports/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Save baseline for main branch
+        working-directory: performance
+        run: |
+          node scripts/compare-results.js --save-baseline --branch main
+
+      - name: Commit and push baselines
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain .performance-baselines/)" ]; then
+            git add .performance-baselines/
+            git commit -m "chore: update performance baselines for main branch"
+            git push origin main
           else
-            echo "⚠️ Baseline results not found, skipping comparison"
+            echo "No baseline changes to commit"
           fi

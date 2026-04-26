@@ -1,19 +1,78 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger};
-use soroban_sdk::{token, Address, Env, String, Vec};
+use crate::modules::markets::{self, DataKey};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::{token, Address, BytesN, Env, String, Vec};
 
 fn setup_test_env() -> (Env, Address, soroban_sdk::Address, PredictIQClient<'static>) {
     let e = Env::default();
     e.mock_all_auths();
 
     let admin = Address::generate(&e);
-    let contract_id = e.register_contract(None, PredictIQ);
+    let contract_id = e.register(PredictIQ, ());
     let client = PredictIQClient::new(&e, &contract_id);
 
-    client.initialize(&admin, &100); // 1% fee
+    let init_guardians = {
+        let mut g = soroban_sdk::Vec::new(&e);
+        g.push_back(types::Guardian {
+            address: Address::generate(&e),
+            voting_power: 1,
+        });
+        g
+    };
+    client.initialize(&admin, &100, &init_guardians);
 
     (e, admin, contract_id, client)
+}
+
+#[test]
+fn test_config_setters_reject_non_admin() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+    let non_admin = Address::generate(&e);
+    let guardian = Address::generate(&e);
+    let token = Address::generate(&e);
+
+    // Remove admin auth mocking for this test
+    e.remove_all_auths();
+
+    // Helper to call and check NotAuthorized
+    macro_rules! expect_not_authorized {
+        ($expr:expr) => {
+            let res = $expr;
+            assert_eq!(res, Err(Ok(ErrorCode::NotAuthorized)));
+        };
+    }
+
+    // set_max_push_payout_winners
+    expect_not_authorized!(client.try_set_max_push_payout_winners(&5));
+
+    // set_creation_deposit
+    expect_not_authorized!(client.try_set_creation_deposit(&100));
+
+    // set_base_fee
+    expect_not_authorized!(client.try_set_base_fee(&100));
+
+    // set_fee_admin
+    expect_not_authorized!(client.try_set_fee_admin(&non_admin));
+
+    // set_dispute_window
+    expect_not_authorized!(client.try_set_dispute_window(&100_000));
+
+    // set_minimum_bet_amount
+    expect_not_authorized!(client.try_set_minimum_bet_amount(&1000));
+
+    // set_creator_reputation
+    expect_not_authorized!(client.try_set_creator_reputation(&non_admin, &types::CreatorReputation::Pro));
+
+    // set_guardian
+    expect_not_authorized!(client.try_set_guardian(&guardian));
+
+    // set_governance_token
+    expect_not_authorized!(client.try_set_governance_token(&token));
+}
+
+fn upgrade_wasm_hash(e: &Env) -> BytesN<32> {
+    BytesN::from_array(e, &[7; 32])
 }
 
 fn create_test_market(
@@ -32,6 +91,8 @@ fn create_test_market(
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "test_feed"),
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
     };
 
     client.create_market(
@@ -46,6 +107,44 @@ fn create_test_market(
         &0,
         &0,
     )
+}
+
+fn make_stored_market(e: &Env, id: u64) -> types::Market {
+    let mut options = Vec::new(e);
+    options.push_back(String::from_str(e, "Yes"));
+    options.push_back(String::from_str(e, "No"));
+
+    types::Market {
+        id,
+        creator: Address::generate(e),
+        description: String::from_str(e, "Seeded Market"),
+        options,
+        status: types::MarketStatus::Active,
+        deadline: 1000,
+        resolution_deadline: 2000,
+        winning_outcome: None,
+        oracle_config: types::OracleConfig {
+            oracle_address: Address::generate(e),
+            feed_id: String::from_str(e, "seeded_feed"),
+            min_responses: Some(1),
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 200,
+        },
+        total_staked: 0,
+        payout_mode: types::PayoutMode::Pull,
+        tier: types::MarketTier::Basic,
+        creation_deposit: 0,
+        parent_id: 0,
+        parent_outcome_idx: 0,
+        resolved_at: None,
+        token_address: Address::generate(e),
+        outcome_stakes: soroban_sdk::Map::new(e),
+        pending_resolution_timestamp: None,
+        dispute_snapshot_ledger: None,
+        dispute_timestamp: None,
+        winner_counts: soroban_sdk::Map::new(e),
+        total_claimed: 0,
+    }
 }
 
 #[test]
@@ -74,10 +173,20 @@ fn test_market_creation_fails_without_deposit() {
         &types::OracleConfig {
             oracle_address: Address::generate(&e),
             feed_id: String::from_str(&e, "test"),
+            min_responses: 1,
+            max_staleness_seconds: 300,
+            max_confidence_bps: 200,
             min_responses: Some(1),
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 200,
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
         },
         &types::MarketTier::Basic,
         &native_token,
+        &0u64,
+        &0u32,
     );
 
     // Will fail due to missing token contract (simulates insufficient balance)
@@ -110,6 +219,124 @@ fn test_market_creation_with_sufficient_deposit() {
     let market = client.get_market(&market_id).unwrap();
     assert_eq!(market.creation_deposit, 0);
     assert_eq!(market.tier, types::MarketTier::Basic);
+}
+
+#[test]
+fn test_market_ids_are_unique_and_sequential() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let mut previous_id = 0u64;
+
+    for expected_id in 1..=1_000u64 {
+        let market_id = create_test_market(
+            &client,
+            &e,
+            &creator,
+            types::MarketTier::Basic,
+            &native_token,
+        );
+
+        assert_eq!(market_id, expected_id);
+        assert!(market_id > previous_id);
+        previous_id = market_id;
+    }
+}
+
+#[test]
+fn test_market_id_overflow_returns_error() {
+    let (e, _admin, contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    e.as_contract(&contract_id, || {
+        e.storage().instance().set(&DataKey::MarketCount, &u64::MAX);
+    });
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let result = client.try_create_market(
+        &creator,
+        &String::from_str(&e, "Overflow Market"),
+        &{
+            let mut opts = Vec::new(&e);
+            opts.push_back(String::from_str(&e, "Yes"));
+            opts.push_back(String::from_str(&e, "No"));
+            opts
+        },
+        &1000,
+        &2000,
+        &types::OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "overflow_feed"),
+            min_responses: Some(1),
+        },
+        &types::MarketTier::Basic,
+        &native_token,
+        &0,
+        &0,
+    );
+
+    assert_eq!(result, Err(Ok(ErrorCode::MarketIdOverflow)));
+}
+
+#[test]
+fn test_market_id_collision_returns_error() {
+    let (e, _admin, contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    e.as_contract(&contract_id, || {
+        e.storage().instance().set(&DataKey::MarketCount, &1u64);
+        e.storage()
+            .persistent()
+            .set(&DataKey::Market(2), &make_stored_market(&e, 2));
+    });
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    let result = client.try_create_market(
+        &creator,
+        &String::from_str(&e, "Collision Market"),
+        &{
+            let mut opts = Vec::new(&e);
+            opts.push_back(String::from_str(&e, "Yes"));
+            opts.push_back(String::from_str(&e, "No"));
+            opts
+        },
+        &1000,
+        &2000,
+        &types::OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "collision_feed"),
+            min_responses: Some(1),
+        },
+        &types::MarketTier::Basic,
+        &native_token,
+        &0,
+        &0,
+    );
+
+    assert_eq!(result, Err(Ok(ErrorCode::MarketIdCollision)));
+}
+
+#[test]
+fn test_market_id_allocator_simulates_one_million_unique_ids() {
+    let (e, _admin, contract_id, _client) = setup_test_env();
+
+    let mut last_id = 0u64;
+    e.as_contract(&contract_id, || {
+        for expected_id in 1..=1_000_000u64 {
+            let allocated_id = markets::allocate_market_id(&e).unwrap();
+            assert_eq!(allocated_id, expected_id);
+            last_id = allocated_id;
+        }
+    });
+
+    assert_eq!(last_id, 1_000_000);
 }
 
 #[test]
@@ -230,6 +457,54 @@ fn test_tiered_commission_rates() {
 }
 
 #[test]
+fn test_push_mode_market_fails_resolution_when_winners_exceed_threshold() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+
+    // Issue #24: winner count now comes from the precise winner_counts counter,
+    // not the tally/100 heuristic. Seed the counter directly via storage.
+    let market_default = create_test_market(
+        &client,
+        &e,
+        &creator,
+        types::MarketTier::Basic,
+        &native_token,
+    );
+    // Simulate 20 unique bettors on outcome 0 — below default threshold of 50.
+    let market_data_key = crate::modules::markets::DataKey::Market(market_default);
+    let mut m: types::Market = e.storage().persistent().get(&market_data_key).unwrap();
+    m.winner_counts.set(0, 20u32);
+    e.storage().persistent().set(&market_data_key, &m);
+
+    client.resolve_market(&market_default, &0);
+    let resolved_default = client.get_market(&market_default).unwrap();
+    assert_eq!(resolved_default.payout_mode, types::PayoutMode::Push);
+
+    // Admin lowers threshold so 20 winners now exceeds it → Pull.
+    client.set_max_push_payout_winners(&10);
+    assert_eq!(client.get_max_push_payout_winners(), 10);
+
+    let market_id = create_test_market(
+        &client,
+        &e,
+        &creator,
+        types::MarketTier::Basic,
+        &native_token,
+    );
+    let market_data_key2 = crate::modules::markets::DataKey::Market(market_lowered);
+    let mut m2: types::Market = e.storage().persistent().get(&market_data_key2).unwrap();
+    m2.winner_counts.set(0, 20u32);
+    e.storage().persistent().set(&market_data_key2, &m2);
+
+    client.resolve_market(&market_lowered, &0);
+    let resolved_lowered = client.get_market(&market_lowered).unwrap();
+    assert_eq!(resolved_lowered.payout_mode, types::PayoutMode::Pull);
+}
+
+#[test]
 fn test_reputation_management() {
     let (e, _admin, _contract_id, client) = setup_test_env();
 
@@ -286,7 +561,7 @@ fn test_place_bet_blocked_when_paused() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     let market_id = create_test_market(
         &client,
@@ -300,7 +575,7 @@ fn test_place_bet_blocked_when_paused() {
     client.pause();
 
     // Try to place bet - should fail with ContractPaused error
-    let result = client.try_place_bet(&bettor, &market_id, &0, &1000, &token_address);
+    let result = client.try_place_bet(&bettor, &market_id, &0, &1000, &token_address, &None);
     assert_eq!(result, Err(Ok(ErrorCode::ContractPaused)));
 }
 
@@ -319,7 +594,7 @@ fn test_partial_freeze_claim_winnings_works_when_paused() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     let market_id = create_test_market(
         &client,
@@ -354,7 +629,7 @@ fn test_only_guardian_can_unpause() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     let market_id = create_test_market(
         &client,
@@ -368,7 +643,7 @@ fn test_only_guardian_can_unpause() {
     let token_address = Address::generate(&e);
 
     // This should succeed now that contract is unpaused
-    let result = client.try_place_bet(&bettor, &market_id, &0, &1000, &token_address);
+    let result = client.try_place_bet(&bettor, &market_id, &0, &1000, &token_address, &None);
     assert_ne!(result, Err(Ok(ErrorCode::ContractPaused)));
 }
 
@@ -448,6 +723,36 @@ fn test_add_guardian() {
     assert_eq!(stored_guardians.len(), 2);
 }
 
+// Issue #19: Admin-Guardian separation tests
+
+#[test]
+fn test_add_admin_as_guardian_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: guardian.clone(), voting_power: 1 });
+    client.initialize_guardians(&guardians);
+
+    // Attempt to add the admin address as a guardian — must be rejected
+    let result = client.try_add_guardian(&types::Guardian {
+        address: admin.clone(),
+        voting_power: 1,
+    });
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
+#[test]
+fn test_initialize_guardians_with_admin_rejected() {
+    let (e, admin, _contract_id, client) = setup_test_env();
+
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian { address: admin.clone(), voting_power: 1 });
+
+    let result = client.try_initialize_guardians(&guardians);
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
 #[test]
 fn test_initiate_upgrade_starts_timelock() {
     let (e, admin, _contract_id, client) = setup_test_env();
@@ -461,10 +766,10 @@ fn test_initiate_upgrade_starts_timelock() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+    let wasm_hash = upgrade_wasm_hash(&e);
 
     // Set initial ledger time
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    e.ledger().set_timestamp(1000);
 
     let result = client.try_initiate_upgrade(&wasm_hash);
     assert!(result.is_ok());
@@ -488,8 +793,8 @@ fn test_execute_upgrade_before_timelock_fails() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -514,8 +819,8 @@ fn test_execute_upgrade_after_timelock_succeeds() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -523,13 +828,12 @@ fn test_execute_upgrade_after_timelock_succeeds() {
     client.vote_for_upgrade(&guardian, &true);
 
     // Advance time past 48 hours (172800 seconds)
-    e.ledger().with_mut(|li| li.timestamp = 1000 + 172800 + 1);
+    e.ledger().set_timestamp(1000 + 172800 + 1);
 
     // Now execute should succeed
     let result = client.try_execute_upgrade();
     assert!(result.is_ok());
 
-    let _returned_hash = result.unwrap();
     // Verify pending upgrade is cleared after execution
     let pending = client.get_pending_upgrade();
     assert!(pending.is_none());
@@ -559,8 +863,8 @@ fn test_insufficient_votes_to_execute() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -568,11 +872,71 @@ fn test_insufficient_votes_to_execute() {
     client.vote_for_upgrade(&guardian1, &true);
 
     // Advance time past 48 hours
-    e.ledger().with_mut(|li| li.timestamp = 1000 + 172800 + 1);
+    e.ledger().set_timestamp(1000 + 172800 + 1);
 
     // Execute should fail - insufficient votes
     let result = client.try_execute_upgrade();
     assert_eq!(result, Err(Ok(ErrorCode::InsufficientVotes)));
+}
+
+// Issue #13: configurable timelock tests
+
+#[test]
+fn test_set_timelock_duration_and_early_execution() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian.clone(),
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    // Reduce timelock to 6 hours (minimum allowed)
+    let six_hours: u64 = 6 * 60 * 60;
+    assert!(client.try_set_timelock_duration(&six_hours).is_ok());
+
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian, &true);
+
+    // Still blocked before 6 hours
+    e.ledger().set_timestamp(1000 + six_hours - 1);
+    assert_eq!(client.try_execute_upgrade(), Err(Ok(ErrorCode::TimelockActive)));
+
+    // Succeeds exactly at 6 hours
+    e.ledger().set_timestamp(1000 + six_hours);
+    assert!(client.try_execute_upgrade().is_ok());
+}
+
+#[test]
+fn test_set_timelock_duration_out_of_range_rejected() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Below minimum (6h)
+    assert_eq!(
+        client.try_set_timelock_duration(&(6 * 3600 - 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+    // Above maximum (7 days)
+    assert_eq!(
+        client.try_set_timelock_duration(&(7 * 24 * 3600 + 1)),
+        Err(Ok(ErrorCode::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_get_timelock_duration_default_and_updated() {
+    let (_e, _admin, _contract_id, client) = setup_test_env();
+
+    // Default should be 48 hours
+    assert_eq!(client.get_timelock_duration(), 48 * 3600);
+
+    // After update, reflects new value
+    client.set_timelock_duration(&(6 * 3600));
+    assert_eq!(client.get_timelock_duration(), 6 * 3600);
 }
 
 #[test]
@@ -599,8 +963,8 @@ fn test_majority_vote_required() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -609,7 +973,7 @@ fn test_majority_vote_required() {
     client.vote_for_upgrade(&guardian2, &true);
 
     // Advance time past 48 hours
-    e.ledger().with_mut(|li| li.timestamp = 1000 + 172800 + 1);
+    e.ledger().set_timestamp(1000 + 172800 + 1);
 
     // Execute should succeed with majority
     let result = client.try_execute_upgrade();
@@ -629,8 +993,8 @@ fn test_cannot_vote_twice() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -657,8 +1021,8 @@ fn test_only_guardians_can_vote() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -686,8 +1050,8 @@ fn test_get_upgrade_votes() {
 
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
 
     client.initiate_upgrade(&wasm_hash);
 
@@ -730,8 +1094,8 @@ fn test_persistent_state_preserved_on_upgrade() {
     assert_eq!(stored_fee, 100);
 
     // Initiate upgrade
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xab,0xcd,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
-    e.ledger().with_mut(|li| li.timestamp = 1000);
+    let wasm_hash = upgrade_wasm_hash(&e);
+    e.ledger().set_timestamp(1000);
     client.initiate_upgrade(&wasm_hash);
 
     // Verify state is still accessible after initiating upgrade
@@ -741,6 +1105,165 @@ fn test_persistent_state_preserved_on_upgrade() {
     // Admin should still be set
     let stored_admin = client.get_admin().unwrap();
     assert_eq!(stored_admin, admin);
+}
+
+#[test]
+fn test_same_hash_cannot_be_reinitiated_while_pending() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = BytesN::from_array(&e, &[1u8; 32]);
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+
+    client.initiate_upgrade(&wasm_hash);
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeAlreadyPending)));
+}
+
+#[test]
+fn test_different_hash_still_blocked_while_another_upgrade_is_pending() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let hash_a = BytesN::from_array(&e, &[2u8; 32]);
+    let hash_b = BytesN::from_array(&e, &[3u8; 32]);
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+
+    client.initiate_upgrade(&hash_a);
+
+    let result = client.try_initiate_upgrade(&hash_b);
+    assert_eq!(result, Err(Ok(ErrorCode::NotAuthorized)));
+}
+
+#[test]
+fn test_rejected_hash_blocked_during_cooldown() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = BytesN::from_array(&e, &[4u8; 32]);
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeHashInCooldown)));
+}
+
+#[test]
+fn test_rejected_hash_allowed_after_cooldown_expires() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = BytesN::from_array(&e, &[5u8; 32]);
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1000 + types::TIMELOCK_DURATION + 1 + types::UPGRADE_COOLDOWN_DURATION + 1
+    });
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_rejected_hash_still_blocked_at_exact_cooldown_boundary() {
+    let (e, _admin, _contract_id, client) = setup_test_env();
+
+    let guardian1 = Address::generate(&e);
+    let guardian2 = Address::generate(&e);
+    let guardian3 = Address::generate(&e);
+    let mut guardians = Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: guardian1.clone(),
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian2,
+        voting_power: 1,
+    });
+    guardians.push_back(types::Guardian {
+        address: guardian3,
+        voting_power: 1,
+    });
+    client.initialize_guardians(&guardians);
+
+    let wasm_hash = BytesN::from_array(&e, &[6u8; 32]);
+    e.ledger().with_mut(|li| li.timestamp = 1000);
+    client.initiate_upgrade(&wasm_hash);
+    client.vote_for_upgrade(&guardian1, &true);
+
+    e.ledger()
+        .with_mut(|li| li.timestamp = 1000 + types::TIMELOCK_DURATION + 1);
+    let execute_result = client.try_execute_upgrade();
+    assert_eq!(execute_result, Err(Ok(ErrorCode::InsufficientVotes)));
+
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1000 + types::TIMELOCK_DURATION + 1 + types::UPGRADE_COOLDOWN_DURATION
+    });
+
+    let result = client.try_initiate_upgrade(&wasm_hash);
+    assert_eq!(result, Err(Ok(ErrorCode::UpgradeHashInCooldown)));
 }
 
 // ===================== Conditional/Chained Market Tests (Issue #25) =====================
@@ -753,7 +1276,7 @@ fn test_create_conditional_market_parent_not_resolved() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create parent market
     let parent_id = create_test_market(
@@ -773,7 +1296,13 @@ fn test_create_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let result = client.try_create_market(
@@ -801,7 +1330,7 @@ fn test_create_conditional_market_parent_wrong_outcome() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create and resolve parent market with outcome 0
     let parent_id = create_test_market(
@@ -822,7 +1351,13 @@ fn test_create_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let result = client.try_create_market(
@@ -850,7 +1385,7 @@ fn test_create_conditional_market_success() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create and resolve parent market with outcome 0
     let parent_id = create_test_market(
@@ -871,7 +1406,13 @@ fn test_create_conditional_market_success() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let child_id = client.create_market(
@@ -906,7 +1447,7 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
     let bettor = Address::generate(&e);
     let token_address = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create parent market
     let parent_id = create_test_market(
@@ -929,7 +1470,13 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let child_id = client.create_market(
@@ -950,7 +1497,7 @@ fn test_place_bet_on_conditional_market_parent_not_resolved() {
     // For this test, we'll just verify the bet placement logic checks parent status
 
     // Try to place bet - should succeed since parent is resolved with correct outcome
-    let result = client.try_place_bet(&bettor, &child_id, &0, &1000, &token_address);
+    let result = client.try_place_bet(&bettor, &child_id, &0, &1000, &token_address, &None);
 
     // Will fail due to missing token contract, but not due to parent validation
     assert_ne!(result, Err(Ok(ErrorCode::ParentMarketNotResolved)));
@@ -966,7 +1513,7 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
     let bettor = Address::generate(&e);
     let token_address = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create parent market and resolve with outcome 0
     let parent_id = create_test_market(
@@ -987,7 +1534,13 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let child_id = client.create_market(
@@ -1007,7 +1560,7 @@ fn test_place_bet_on_conditional_market_parent_wrong_outcome() {
     // In production, this would be prevented, but we test the validation logic
 
     // Try to place bet - should succeed since parent resolved correctly
-    let result = client.try_place_bet(&bettor, &child_id, &0, &1000, &token_address);
+    let result = client.try_place_bet(&bettor, &child_id, &0, &1000, &token_address, &None);
 
     // Will fail due to missing token contract, but not due to parent validation
     assert_ne!(result, Err(Ok(ErrorCode::ParentMarketInvalidOutcome)));
@@ -1021,7 +1574,7 @@ fn test_independent_market_has_no_parent() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create independent market (parent_id = 0)
     let market_id = create_test_market(
@@ -1045,7 +1598,7 @@ fn test_multi_level_conditional_markets() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create level 1 market
     let level1_id = create_test_market(
@@ -1066,7 +1619,13 @@ fn test_multi_level_conditional_markets() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let level2_id = client.create_market(
@@ -1112,7 +1671,7 @@ fn test_create_conditional_market_invalid_parent_outcome_idx() {
     let creator = Address::generate(&e);
     let native_token = Address::generate(&e);
 
-    e.ledger().with_mut(|li| li.timestamp = 500);
+    e.ledger().set_timestamp(500);
 
     // Create parent market with 2 outcomes (0 and 1)
     let parent_id = create_test_market(
@@ -1133,7 +1692,13 @@ fn test_create_conditional_market_invalid_parent_outcome_idx() {
     let oracle_config = types::OracleConfig {
         oracle_address: Address::generate(&e),
         feed_id: String::from_str(&e, "test_feed"),
+        min_responses: 1,
+        max_staleness_seconds: 300,
+        max_confidence_bps: 200,
         min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 200,
+        max_confidence_bps: 100,
     };
 
     let result = client.try_create_market(
@@ -1280,7 +1845,7 @@ fn test_pending_upgrade_survives_3_months_inactivity() {
     });
     client.initialize_guardians(&guardians);
 
-    let wasm_hash = soroban_sdk::BytesN::from_array(&e, &[0xde,0xad,0xbe,0xef,0x12,0x34,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);
+    let wasm_hash = upgrade_wasm_hash(&e);
     e.ledger().with_mut(|li| li.timestamp = 1000);
 
     client.initiate_upgrade(&wasm_hash);
@@ -1294,7 +1859,10 @@ fn test_pending_upgrade_survives_3_months_inactivity() {
 
     // PendingUpgrade must still be readable — TTL was set to 180 days on write
     let pending = client.get_pending_upgrade();
-    assert!(pending.is_some(), "PendingUpgrade expired after 3 months of inactivity");
+    assert!(
+        pending.is_some(),
+        "PendingUpgrade expired after 3 months of inactivity"
+    );
     assert_eq!(pending.unwrap().wasm_hash, wasm_hash);
 }
 
@@ -1317,7 +1885,11 @@ fn test_guardian_set_survives_3_months_inactivity() {
     });
 
     let stored = client.get_guardians();
-    assert_eq!(stored.len(), 1, "GuardianSet expired after 3 months of inactivity");
+    assert_eq!(
+        stored.len(),
+        1,
+        "GuardianSet expired after 3 months of inactivity"
+    );
     assert_eq!(stored.get(0).unwrap().address, guardian);
 }
 
@@ -1334,7 +1906,8 @@ fn test_vote_on_upgrade_refreshes_ttl() {
     client.initialize_guardians(&guardians);
 
     e.ledger().with_mut(|li| li.timestamp = 1000);
-    client.initiate_upgrade(&soroban_sdk::BytesN::from_array(&e, &[0xca,0xfe,0xba,0xbe,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]));
+    let wasm_hash = upgrade_wasm_hash(&e);
+    client.initiate_upgrade(&wasm_hash);
 
     // Vote refreshes the TTL on PendingUpgrade
     client.vote_for_upgrade(&guardian, &true);
@@ -1393,12 +1966,13 @@ fn test_voting_works_with_optimized_vote_struct() {
     );
 
     // Move to PendingResolution then dispute
-    client.set_oracle_result(&market_id, &0);
+    client.set_oracle_result(&market_id, &0, &0);
     e.ledger().with_mut(|li| li.timestamp = resolution_deadline);
     client.attempt_oracle_resolution(&market_id);
 
     let disputer = Address::generate(&e);
-    e.ledger().with_mut(|li| li.timestamp = resolution_deadline + 1000);
+    e.ledger()
+        .with_mut(|li| li.timestamp = resolution_deadline + 1000);
     client.file_dispute(&disputer, &market_id);
 
     // Two voters — outcome 1 gets 70%, outcome 0 gets 30%
@@ -1459,12 +2033,13 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
         &0,
     );
 
-    client.set_oracle_result(&market_id, &0);
+    client.set_oracle_result(&market_id, &0, &0);
     e.ledger().with_mut(|li| li.timestamp = resolution_deadline);
     client.attempt_oracle_resolution(&market_id);
 
     let disputer = Address::generate(&e);
-    e.ledger().with_mut(|li| li.timestamp = resolution_deadline + 1000);
+    e.ledger()
+        .with_mut(|li| li.timestamp = resolution_deadline + 1000);
     client.file_dispute(&disputer, &market_id);
 
     let voter = Address::generate(&e);
@@ -1478,3 +2053,800 @@ fn test_double_vote_still_rejected_with_optimized_struct() {
 }
 
 
+
+// ===================== Dispute Deadline Idempotency Test =====================
+
+#[test]
+fn test_dispute_deadline_extension_is_one_time_and_idempotent() {
+    // Verifies that a second file_dispute call on an already-Disputed market:
+    //   1. Is rejected with MarketNotPendingResolution.
+    //   2. Does NOT extend resolution_deadline a second time.
+    let (e, _admin, _contract_id, client) = setup_test_env();
+    client.set_creation_deposit(&0);
+
+    let creator = Address::generate(&e);
+    let native_token = Address::generate(&e);
+    let resolution_deadline = 2000u64;
+
+    e.ledger().with_mut(|li| li.timestamp = 500);
+
+    let market_id = client.create_market(
+        &creator,
+        &String::from_str(&e, "Idempotent dispute test"),
+        &{
+            let mut opts = Vec::new(&e);
+            opts.push_back(String::from_str(&e, "Yes"));
+            opts.push_back(String::from_str(&e, "No"));
+            opts
+        },
+        &1000,
+        &resolution_deadline,
+        &types::OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "test"),
+            min_responses: Some(1),
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 200,
+        },
+        &types::MarketTier::Basic,
+        &native_token,
+        &0,
+        &0,
+    );
+
+    // Move market to PendingResolution
+    client.set_oracle_result(&market_id, &0, &0);
+    e.ledger().with_mut(|li| li.timestamp = resolution_deadline);
+    client.attempt_oracle_resolution(&market_id);
+
+    // First dispute — must succeed and extend deadline by one dispute window (72h)
+    let disputer = Address::generate(&e);
+    e.ledger().with_mut(|li| li.timestamp = resolution_deadline + 1000);
+    client.file_dispute(&disputer, &market_id);
+
+    let market_after_first = client.get_market(&market_id).unwrap();
+    assert_eq!(market_after_first.status, types::MarketStatus::Disputed);
+    let deadline_after_first = market_after_first.resolution_deadline;
+    // Deadline must have been extended exactly once
+    assert_eq!(
+        deadline_after_first,
+        resolution_deadline + crate::modules::resolution::DEFAULT_DISPUTE_WINDOW_SECONDS
+    );
+
+    // Second dispute attempt — must be rejected because market is already Disputed
+    let second_disputer = Address::generate(&e);
+    let result = client.try_file_dispute(&second_disputer, &market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::MarketNotPendingResolution)));
+
+    // Deadline must be unchanged after the rejected second attempt
+    let market_after_second = client.get_market(&market_id).unwrap();
+    assert_eq!(market_after_second.resolution_deadline, deadline_after_first);
+    assert_eq!(market_after_second.status, types::MarketStatus::Disputed);
+}
+
+#[test]
+fn test_initialize_rejects_non_deployer() {
+    let e = Env::default();
+    // Do NOT mock all auths — we want auth to be enforced.
+    // Register the contract without initializing it.
+    let contract_id = e.register(PredictIQ, ());
+    let client = PredictIQClient::new(&e, &contract_id);
+
+    let attacker = Address::generate(&e);
+    let mut guardians = soroban_sdk::Vec::new(&e);
+    guardians.push_back(types::Guardian {
+        address: Address::generate(&e),
+        voting_power: 1,
+    });
+
+    // An attacker (non-deployer) attempting to initialize must fail.
+    let result = client.try_initialize(&attacker, &100, &guardians);
+    assert!(result.is_err());
+}
+
+
+// ─── Fee Calculation Unit Tests ───────────────────────────────────────────────
+
+mod fee_calculation_tests {
+    use crate::modules::fees;
+    use crate::types::MarketTier;
+    use crate::{PredictIQ, PredictIQClient};
+    use soroban_sdk::{testutils::Address as _, token, Address, Env};
+
+    fn setup() -> (Env, PredictIQClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(PredictIQ, ());
+        let client = PredictIQClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &100); // 100 bps = 1%
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+
+        (env, client, admin, token_address, contract_id)
+    }
+
+    /// Seed fee revenue and referrer balance directly into contract storage.
+    fn seed_fee(env: &Env, contract_id: &Address, token: &Address, amount: i128) {
+        env.as_contract(contract_id, || {
+            fees::collect_fee(env, token.clone(), amount);
+        });
+    }
+
+    fn seed_referral(
+        env: &Env,
+        contract_id: &Address,
+        referrer: &Address,
+        token: &Address,
+        fee_amount: i128,
+    ) {
+        env.as_contract(contract_id, || {
+            fees::add_referral_reward(env, referrer, token, fee_amount);
+        });
+    }
+
+    // ── Base fee ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_base_fee_get_set() {
+        let (_env, client, _admin, _token, _contract_id) = setup();
+        assert_eq!(client.get_base_fee(), 100);
+        client.set_base_fee(&250);
+        assert_eq!(client.get_base_fee(), 250);
+    }
+
+    #[test]
+    fn test_base_fee_collected_and_tracked() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        // Simulate fee collection as if a 10_000 bet was placed (1% = 100)
+        seed_fee(&env, &contract_id, &token, 100);
+
+        assert_eq!(client.get_revenue(&token), 100);
+    }
+
+    #[test]
+    fn test_base_fee_zero_produces_no_revenue() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        client.set_base_fee(&0);
+
+        // With 0 bps fee, calculate_fee returns 0 — nothing collected
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_fee(&env, 10_000);
+            assert_eq!(fee, 0);
+            // collect_fee with 0 is a no-op in bets.rs (if fee > 0 guard)
+        });
+
+        assert_eq!(client.get_revenue(&token), 0);
+    }
+
+    #[test]
+    fn test_base_fee_accumulates_across_multiple_collections() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token, 100);
+
+        assert_eq!(client.get_revenue(&token), 300);
+    }
+
+    // ── Tier-based fees ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tiered_fee_basic_is_full_rate() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps on 10_000 = 100
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            assert_eq!(fee, 100);
+        });
+    }
+
+    #[test]
+    fn test_tiered_fee_pro_applies_25_percent_discount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps × 75% = 75 bps on 10_000 = 75
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Pro);
+            assert_eq!(fee, 75);
+        });
+    }
+
+    #[test]
+    fn test_tiered_fee_institutional_applies_50_percent_discount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            // 100 bps × 50% = 50 bps on 10_000 = 50
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Institutional);
+            assert_eq!(fee, 50);
+        });
+    }
+
+    #[test]
+    fn test_tier_fees_ordered_basic_gt_pro_gt_institutional() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let basic = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            let pro = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Pro);
+            let inst = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Institutional);
+
+            assert!(basic > pro, "Basic fee must exceed Pro fee");
+            assert!(pro > inst, "Pro fee must exceed Institutional fee");
+        });
+    }
+
+    // ── Referral fee ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_referral_reward_is_10_percent_of_protocol_fee() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        // Seed contract with tokens so claim transfer succeeds
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        // Protocol fee = 100; referral reward = 10% of 100 = 10
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+
+        let claimed = client.claim_referral_rewards(&referrer, &token);
+        assert_eq!(claimed, 10);
+    }
+
+    #[test]
+    fn test_no_referral_reward_when_fee_is_zero() {
+        let (env, client, _admin, token, _contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        // No reward seeded — claim must fail
+        let result = client.try_claim_referral_rewards(&referrer, &token);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InsufficientBalance)));
+    }
+
+    #[test]
+    fn test_referral_rewards_accumulate_across_bets() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        // Three bets each generating fee=100 → reward=10 each
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+
+        let claimed = client.claim_referral_rewards(&referrer, &token);
+        assert_eq!(claimed, 30);
+    }
+
+    #[test]
+    fn test_referral_reward_zeroed_after_claim() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let referrer = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &token).mint(&contract_id, &1_000);
+
+        seed_referral(&env, &contract_id, &referrer, &token, 100);
+        client.claim_referral_rewards(&referrer, &token);
+
+        // Second claim must fail — balance is zero
+        let result = client.try_claim_referral_rewards(&referrer, &token);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InsufficientBalance)));
+    }
+
+    // ── Fee distribution / edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_fee_and_net_sum_to_original_amount() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let amount = 10_000i128;
+            let fee = fees::calculate_tiered_fee(&env, amount, &MarketTier::Basic);
+            let net = amount - fee;
+            assert_eq!(fee + net, amount);
+        });
+    }
+
+    #[test]
+    fn test_zero_bet_produces_zero_fee() {
+        let (env, _client, _admin, _token, contract_id) = setup();
+
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_fee(&env, 0);
+            assert_eq!(fee, 0);
+        });
+    }
+
+    #[test]
+    fn test_maximum_fee_bps_takes_entire_amount() {
+        let (env, client, _admin, _token, contract_id) = setup();
+
+        client.set_base_fee(&10_000); // 100%
+
+        env.as_contract(&contract_id, || {
+            let fee = fees::calculate_tiered_fee(&env, 10_000, &MarketTier::Basic);
+            assert_eq!(fee, 10_000);
+        });
+    }
+
+    #[test]
+    fn test_revenue_isolated_per_token() {
+        let (env, client, _admin, token, contract_id) = setup();
+
+        let token_admin2 = Address::generate(&env);
+        let token_id2 = env.register_stellar_asset_contract_v2(token_admin2.clone());
+        let token2 = token_id2.address();
+
+        seed_fee(&env, &contract_id, &token, 100);
+        seed_fee(&env, &contract_id, &token2, 200);
+
+        assert_eq!(client.get_revenue(&token), 100);
+        assert_eq!(client.get_revenue(&token2), 200);
+    }
+}
+
+// ─── Dispute Resolution Unit Tests ────────────────────────────────────────────
+
+mod dispute_resolution_tests {
+    use crate::modules::{markets, voting};
+    use crate::types::{MarketStatus, MarketTier, OracleConfig};
+    use crate::{PredictIQ, PredictIQClient};
+    use soroban_sdk::{testutils::{Address as _, Ledger as _}, token, Address, Env, String, Vec};
+
+    const DISPUTE_WINDOW: u64 = 86_400; // 24h — matches resolution::DISPUTE_WINDOW_SECONDS
+
+    fn setup() -> (Env, PredictIQClient<'static>, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(PredictIQ, ());
+        let client = PredictIQClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &0); // 0 fee — keeps tests simple
+
+        (env, client, admin, contract_id)
+    }
+
+    /// Create a minimal market and return its id.
+    fn create_market(env: &Env, client: &PredictIQClient, _contract_id: &Address) -> u64 {
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token = token_id.address();
+
+        let options = Vec::from_array(
+            env,
+            [String::from_str(env, "Yes"), String::from_str(env, "No")],
+        );
+        client.create_market(
+            &Address::generate(env),
+            &String::from_str(env, "Dispute Test"),
+            &options,
+            &1000,
+            &2000,
+            &OracleConfig {
+                oracle_address: Address::generate(env),
+                feed_id: String::from_str(env, "feed"),
+                min_responses: Some(1),
+                max_staleness_seconds: 3600,
+                max_confidence_bps: 200,
+            },
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        )
+    }
+
+    /// Seed a market directly into the given status, bypassing the oracle flow.
+    fn seed_market_status(
+        env: &Env,
+        contract_id: &Address,
+        market_id: u64,
+        status: MarketStatus,
+        pending_ts: Option<u64>,
+        dispute_ts: Option<u64>,
+    ) {
+        env.as_contract(contract_id, || {
+            let mut market = markets::get_market(env, market_id).unwrap();
+            market.status = status;
+            market.pending_resolution_timestamp = pending_ts;
+            market.dispute_timestamp = dispute_ts;
+            markets::update_market(env, market);
+        });
+    }
+
+    // ── file_dispute state transitions ────────────────────────────────────────
+
+    #[test]
+    fn test_file_dispute_on_active_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_transitions_to_disputed() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        // Dispute within the 24h window
+        env.ledger().set_timestamp(pending_ts + 1);
+        let disputer = Address::generate(&env);
+        client.file_dispute(&disputer, &market_id);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Disputed);
+        assert_eq!(market.dispute_timestamp, Some(pending_ts + 1));
+    }
+
+    #[test]
+    fn test_file_dispute_after_window_closed_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        // At exactly pending_ts + window the window is closed
+        env.ledger().set_timestamp(pending_ts + DISPUTE_WINDOW);
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::DisputeWindowClosed)));
+    }
+
+    #[test]
+    fn test_file_dispute_on_already_disputed_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::Disputed,
+            Some(1000),
+            Some(1001),
+        );
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_on_resolved_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        seed_market_status(&env, &contract_id, market_id, MarketStatus::Resolved, None, None);
+
+        let disputer = Address::generate(&env);
+        let result = client.try_file_dispute(&disputer, &market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotPendingResolution)));
+    }
+
+    #[test]
+    fn test_file_dispute_extends_resolution_deadline() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let pending_ts = 5_000u64;
+        seed_market_status(
+            &env,
+            &contract_id,
+            market_id,
+            MarketStatus::PendingResolution,
+            Some(pending_ts),
+            None,
+        );
+
+        let before = client.get_market(&market_id).unwrap().resolution_deadline;
+
+        env.ledger().set_timestamp(pending_ts + 1);
+        client.file_dispute(&Address::generate(&env), &market_id);
+
+        let after = client.get_market(&market_id).unwrap().resolution_deadline;
+        assert_eq!(after, before + DISPUTE_WINDOW);
+    }
+
+    // ── resolve_market (admin direct resolution) ──────────────────────────────
+
+    #[test]
+    fn test_resolve_market_sets_resolved_status_and_outcome() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        client.resolve_market(&market_id, &1);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(1));
+    }
+
+    #[test]
+    fn test_resolve_market_invalid_outcome_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let result = client.try_resolve_market(&market_id, &99);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InvalidOutcome)));
+    }
+
+    #[test]
+    fn test_resolve_market_nonexistent_market_rejected() {
+        let (_env, client, _admin, _contract_id) = setup();
+
+        let result = client.try_resolve_market(&999, &0);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotFound)));
+    }
+
+    // ── cast_vote weight calculation and tally ────────────────────────────────
+
+    fn setup_gov_token(env: &Env, _client: &PredictIQClient, contract_id: &Address) -> Address {
+        let token_admin = Address::generate(env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
+        // Set governance token directly in instance storage
+        env.as_contract(contract_id, || {
+            env.storage()
+                .instance()
+                .set(&crate::types::ConfigKey::GovernanceToken, &token_address);
+        });
+        token_address
+    }
+
+    fn seed_disputed_market(
+        env: &Env,
+        contract_id: &Address,
+        market_id: u64,
+        snapshot_ledger: u32,
+    ) {
+        env.as_contract(contract_id, || {
+            let mut market = markets::get_market(env, market_id).unwrap();
+            market.status = MarketStatus::Disputed;
+            market.pending_resolution_timestamp = Some(1000);
+            market.dispute_timestamp = Some(1001);
+            market.dispute_snapshot_ledger = Some(snapshot_ledger);
+            markets::update_market(env, market);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_on_non_disputed_market_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        setup_gov_token(&env, &client, &contract_id);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &0, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::MarketNotDisputed)));
+    }
+
+    #[test]
+    fn test_cast_vote_invalid_outcome_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &99, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::InvalidOutcome)));
+    }
+
+    #[test]
+    fn test_cast_vote_without_governance_token_rejected() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        // No governance token set
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        let result = client.try_cast_vote(&voter, &market_id, &0, &100);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::GovernanceTokenNotSet)));
+    }
+
+    #[test]
+    fn test_cast_vote_accumulates_tally() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter1, &600);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter2, &400);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter1, &market_id, &0, &600);
+        client.cast_vote(&voter2, &market_id, &0, &400);
+
+        env.as_contract(&contract_id, || {
+            let tally = voting::get_tally(&env, market_id, 0);
+            assert_eq!(tally, 1_000);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_weight_reflects_token_balance() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter, &700);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &700);
+
+        client.cast_vote(&voter, &market_id, &1, &700);
+
+        env.as_contract(&contract_id, || {
+            let tally = voting::get_tally(&env, market_id, 1);
+            assert_eq!(tally, 700);
+        });
+    }
+
+    #[test]
+    fn test_cast_vote_split_across_outcomes() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &700);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &300);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &700);
+        client.cast_vote(&voter_b, &market_id, &1, &300);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(voting::get_tally(&env, market_id, 0), 700);
+            assert_eq!(voting::get_tally(&env, market_id, 1), 300);
+        });
+    }
+
+    // ── Tie-breaking / majority threshold ─────────────────────────────────────
+
+    #[test]
+    fn test_zero_votes_tally_returns_zero() {
+        let (env, _client, _admin, contract_id) = setup();
+        let market_id = 1u64;
+
+        env.as_contract(&contract_id, || {
+            // No votes seeded — tally must be 0
+            assert_eq!(voting::get_tally(&env, market_id, 0), 0);
+            assert_eq!(voting::get_tally(&env, market_id, 1), 0);
+        });
+    }
+
+    #[test]
+    fn test_equal_votes_on_both_outcomes_is_a_tie() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &500);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &500);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &1_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &500);
+        client.cast_vote(&voter_b, &market_id, &1, &500);
+
+        // 50/50 split — neither outcome reaches 60% majority
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let t1 = voting::get_tally(&env, market_id, 1);
+            let total = t0 + t1;
+            let max_pct = (t0.max(t1) * 10_000) / total;
+            // 50% < 60% threshold (6000 bps)
+            assert!(max_pct < 6_000, "50/50 split must not reach 60% majority");
+        });
+    }
+
+    #[test]
+    fn test_59_percent_vote_does_not_reach_majority() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &5_900);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &4_100);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &10_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &5_900);
+        client.cast_vote(&voter_b, &market_id, &1, &4_100);
+
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let total = t0 + voting::get_tally(&env, market_id, 1);
+            let pct = (t0 * 10_000) / total;
+            assert!(pct < 6_000, "59% must not reach 60% majority threshold");
+        });
+    }
+
+    #[test]
+    fn test_60_percent_vote_reaches_majority() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+        let gov_token = setup_gov_token(&env, &client, &contract_id);
+        seed_disputed_market(&env, &contract_id, market_id, 1);
+
+        let voter_a = Address::generate(&env);
+        let voter_b = Address::generate(&env);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_a, &6_000);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&voter_b, &4_000);
+        token::StellarAssetClient::new(&env, &gov_token).mint(&contract_id, &10_000);
+
+        client.cast_vote(&voter_a, &market_id, &0, &6_000);
+        client.cast_vote(&voter_b, &market_id, &1, &4_000);
+
+        env.as_contract(&contract_id, || {
+            let t0 = voting::get_tally(&env, market_id, 0);
+            let total = t0 + voting::get_tally(&env, market_id, 1);
+            let pct = (t0 * 10_000) / total;
+            assert!(pct >= 6_000, "60% must reach majority threshold");
+        });
+    }
+
+    // ── get_resolution_metrics ────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolution_metrics_nonexistent_market_returns_zeros() {
+        let (_env, client, _admin, _contract_id) = setup();
+
+        let metrics = client.get_resolution_metrics(&999, &0);
+        assert_eq!(metrics.winner_count, 0);
+        assert_eq!(metrics.total_winning_stake, 0);
+    }
+
+    #[test]
+    fn test_resolution_metrics_gas_estimate_scales_with_winner_count() {
+        let (env, client, _admin, contract_id) = setup();
+        let market_id = create_market(&env, &client, &contract_id);
+
+        let metrics_0 = client.get_resolution_metrics(&market_id, &0);
+        // gas_estimate = 100_000 + winner_count * 50_000
+        assert_eq!(metrics_0.gas_estimate, 100_000 + metrics_0.winner_count as u64 * 50_000);
+    }
+}

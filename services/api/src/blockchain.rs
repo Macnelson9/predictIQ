@@ -100,6 +100,7 @@ pub struct BlockchainHealth {
     pub is_healthy: bool,
     pub contract_reachable: bool,
     pub checked_at_unix: u64,
+    pub status: HealthStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +110,26 @@ pub struct ContractEvent {
     pub topic: String,
     pub tx_hash: Option<String>,
     pub value: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayRequest {
+    pub from_ledger: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayProgress {
+    pub from_ledger: u32,
+    pub events_replayed: usize,
+    pub completed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,12 +364,10 @@ impl BlockchainClient {
     pub async fn user_bets_cached(
         &self,
         user: &str,
-        page: i64,
-        page_size: i64,
-    ) -> anyhow::Result<UserBetsPage> {
-        let page = page.max(1);
-        let page_size = page_size.clamp(1, 100);
-        let key = keys::chain_user_bets(&self.network, user, page, page_size);
+        limit: i64,
+    ) -> anyhow::Result<Vec<UserBet>> {
+        let limit = limit.clamp(1, 100);
+        let key = keys::chain_user_bets(&self.network, user, limit);
         let ttl = Duration::from_secs(30);
         let endpoint = "user_bets";
 
@@ -362,6 +381,7 @@ impl BlockchainClient {
                         json!({
                             "contractId": self.contract_id,
                             "key": format!("user_bets:{}", user),
+                            "limit": limit,
                         }),
                     )
                     .await
@@ -373,15 +393,7 @@ impl BlockchainClient {
                     .cloned()
                     .unwrap_or_default();
 
-                let total = bets.len() as i64;
-                let offset = ((page - 1) * page_size) as usize;
-                let paged = bets
-                    .into_iter()
-                    .skip(offset)
-                    .take(page_size as usize)
-                    .collect::<Vec<_>>();
-
-                let items = paged
+                let items = bets
                     .into_iter()
                     .map(|entry| UserBet {
                         market_id: entry
@@ -405,13 +417,7 @@ impl BlockchainClient {
                     })
                     .collect::<Vec<_>>();
 
-                Ok(UserBetsPage {
-                    user: user.to_string(),
-                    page,
-                    page_size,
-                    total,
-                    items,
-                })
+                Ok(items)
             })
             .await?;
 
@@ -542,9 +548,16 @@ impl BlockchainClient {
                     network: self.network.clone(),
                     rpc_url: self.rpc_url.clone(),
                     latest_ledger: latest,
-                    is_healthy: latest > 0,
+                    is_healthy: latest > 0 && contract_reachable,
                     contract_reachable,
                     checked_at_unix,
+                    status: if latest > 0 && contract_reachable {
+                        HealthStatus::Healthy
+                    } else if latest > 0 {
+                        HealthStatus::Degraded
+                    } else {
+                        HealthStatus::Unhealthy
+                    },
                 })
             })
             .await?;
@@ -562,43 +575,55 @@ impl BlockchainClient {
         #[derive(Debug, Deserialize)]
         struct EventsResponse {
             events: Vec<Value>,
+            #[serde(rename = "latestLedger")]
+            latest_ledger: Option<u32>,
         }
 
-        let result = self
-            .rpc_call::<EventsResponse>(
-                "getEvents",
-                json!({
-                    "startLedger": from_ledger,
-                    "filters": [{"type": "contract", "contractIds": [self.contract_id]}],
-                    "limit": 100,
-                }),
-            )
-            .await
-            .unwrap_or(EventsResponse { events: vec![] });
+        let mut all_events: Vec<ContractEvent> = Vec::new();
+        let mut cursor: Option<String> = None;
 
-        let events = result
-            .events
-            .into_iter()
-            .map(|e| ContractEvent {
-                id: e
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                ledger: e.get("ledger").and_then(Value::as_u64).unwrap_or_default() as u32,
-                topic: e
-                    .get("topic")
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                tx_hash: e
-                    .get("txHash")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                value: e,
-            })
-            .collect::<Vec<_>>();
+        loop {
+            let mut params = json!({
+                "startLedger": from_ledger,
+                "filters": [{"type": "contract", "contractIds": [self.contract_id]}],
+                "limit": 100,
+            });
+            if let Some(ref c) = cursor {
+                params["cursor"] = json!(c);
+            }
 
-        Ok(events)
+            let result = self
+                .rpc_call::<EventsResponse>("getEvents", params)
+                .await
+                .unwrap_or(EventsResponse { events: vec![], latest_ledger: None });
+
+            let batch_len = result.events.len();
+            let last_id = result.events.last()
+                .and_then(|e| e.get("id"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+
+            for e in result.events {
+                all_events.push(ContractEvent {
+                    id: e.get("id").and_then(Value::as_str).unwrap_or("unknown").to_string(),
+                    ledger: e.get("ledger").and_then(Value::as_u64).unwrap_or_default() as u32,
+                    topic: e.get("topic").map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                    tx_hash: e.get("txHash").and_then(Value::as_str).map(ToOwned::to_owned),
+                    value: e,
+                });
+            }
+
+            // Stop if we got fewer than the page size (last page)
+            if batch_len < 100 {
+                break;
+            }
+            cursor = last_id;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(all_events)
     }
 
     async fn handle_reorg_if_detected(&self, latest_ledger: u32) -> anyhow::Result<()> {
@@ -700,11 +725,57 @@ impl BlockchainClient {
     }
 
     pub async fn watch_transaction(&self, hash: &str) {
-        self.monitor
-            .watched_txs
-            .write()
-            .await
-            .insert(hash.to_string());
+        const MAX_WATCHED: usize = 1000;
+        let mut set = self.monitor.watched_txs.write().await;
+        if set.len() < MAX_WATCHED {
+            set.insert(hash.to_string());
+        } else {
+            tracing::warn!("watched_txs cap reached ({MAX_WATCHED}), dropping tx: {hash}");
+        }
+    }
+
+    /// Replay missed events from `from_ledger` up to the current confirmed tip.
+    /// Idempotent: events are stored by their unique ID so re-running is safe.
+    /// Progress is persisted in Redis so callers can poll for completion.
+    pub async fn replay_events(&self, from_ledger: u32) -> anyhow::Result<ReplayProgress> {
+        let progress_key = keys::chain_replay_progress(&self.network, from_ledger);
+
+        // Return cached progress if already completed
+        if let Some(cached) = self.cache.get_json::<ReplayProgress>(&progress_key).await? {
+            if cached.completed {
+                return Ok(cached);
+            }
+        }
+
+        let latest = self.latest_ledger().await?;
+        let confirmed_tip = latest.saturating_sub(self.confirmation_ledger_lag);
+
+        let events = self.fetch_events_since(from_ledger).await?;
+        let events_replayed = events.len();
+
+        for event in events {
+            // Only store events up to the confirmed tip (idempotent by key)
+            if event.ledger > confirmed_tip {
+                continue;
+            }
+            let event_key = format!("{}:event:{}", keys::CHAIN_PREFIX, event.id);
+            self.cache
+                .set_json(&event_key, &event, Duration::from_secs(30 * 60))
+                .await?;
+        }
+
+        let progress = ReplayProgress {
+            from_ledger,
+            events_replayed,
+            completed: true,
+        };
+
+        self.cache
+            .set_json(&progress_key, &progress, Duration::from_secs(60 * 60))
+            .await?;
+
+        tracing::info!(from_ledger, events_replayed, "event replay completed");
+        Ok(progress)
     }
 
     pub fn start_background_tasks(self: Arc<Self>) {
