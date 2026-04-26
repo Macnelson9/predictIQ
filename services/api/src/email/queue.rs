@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::cache::RedisCache;
 use crate::db::Database;
+use crate::email::service::idempotency_key;
 use crate::email::types::{EmailJobStatus, EmailJobType};
 
 const EMAIL_QUEUE_KEY: &str = "email:queue";
@@ -274,16 +275,33 @@ impl EmailQueue {
             .email_update_job_status(job_id, EmailJobStatus::Processing.as_str(), None)
             .await?;
 
-        // Send email
+        // Derive a stable idempotency key for this job so retries never
+        // produce duplicate sends within the configured TTL window.
+        let idem = idempotency_key(
+            &job.recipient_email,
+            &job.template_name,
+            &job.template_data,
+        );
+
+        // Send email (deduplication handled inside send_email_idempotent)
         let message_id = service
-            .send_email(
+            .send_email_idempotent(
                 &job.recipient_email,
                 &job.template_name,
                 &job.template_data,
+                Some(&idem),
             )
             .await?;
 
-        // Mark as completed
+        if message_id.starts_with("deduplicated:") {
+            tracing::info!(
+                job_id = %job_id,
+                idem_key = %idem,
+                "Email job skipped — already sent within idempotency window"
+            );
+        }
+
+        // Mark as completed regardless (dedup counts as success)
         self.mark_completed(job_id, Some(message_id)).await?;
 
         Ok(())
