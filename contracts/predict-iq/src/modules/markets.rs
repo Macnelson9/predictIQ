@@ -7,6 +7,36 @@ pub enum DataKey {
     Market(u64),
     MarketCount,
     CreatorReputation(Address),
+    /// Presence key for the status index.
+    /// `StatusIndex(market_id, status)` exists iff market `market_id` currently
+    /// has `status`.  Querying by status probes these keys instead of loading
+    /// every market record, reducing per-call gas from O(total) to O(limit).
+    StatusIndex(u64, MarketStatus),
+}
+
+/// Returns true if the status-index entry for `(market_id, status)` exists.
+pub fn has_status_index(e: &Env, market_id: u64, status: &MarketStatus) -> bool {
+    e.storage()
+        .persistent()
+        .has(&DataKey::StatusIndex(market_id, status.clone()))
+}
+
+/// Write the status-index entry for `market_id` with `new_status`,
+/// removing the entry for `old_status` when it differs.
+pub fn update_status_index(
+    e: &Env,
+    market_id: u64,
+    old_status: &MarketStatus,
+    new_status: &MarketStatus,
+) {
+    if old_status != new_status {
+        e.storage()
+            .persistent()
+            .remove(&DataKey::StatusIndex(market_id, old_status.clone()));
+    }
+    e.storage()
+        .persistent()
+        .set(&DataKey::StatusIndex(market_id, new_status.clone()), &true);
 }
 
 pub fn create_market(
@@ -185,7 +215,12 @@ pub fn create_market(
     e.storage()
         .persistent()
         .extend_ttl(&DataKey::Market(count), TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD);
-    
+
+    // Maintain status index so get_markets_by_status can probe O(limit) keys.
+    e.storage()
+        .persistent()
+        .set(&DataKey::StatusIndex(count, MarketStatus::Active), &true);
+
     e.storage().instance().set(&DataKey::MarketCount, &count);
 
     // Emit standardized MarketCreated event
@@ -207,6 +242,10 @@ pub fn get_market(e: &Env, id: u64) -> Option<Market> {
 }
 
 pub fn update_market(e: &Env, market: Market) {
+    // Keep the status index in sync when the market's status changes.
+    if let Some(old) = get_market(e, market.id) {
+        update_status_index(e, market.id, &old.status, &market.status);
+    }
     e.storage()
         .persistent()
         .set(&DataKey::Market(market.id), &market);
@@ -369,6 +408,11 @@ pub fn prune_market(e: &Env, market_id: u64) -> Result<(), ErrorCode> {
 
     // Archive the market ID for off-chain indexers
     crate::modules::event_archive::archive_market(e, market_id);
+
+    // Remove status index entry before dropping the market record.
+    e.storage()
+        .persistent()
+        .remove(&DataKey::StatusIndex(market_id, MarketStatus::Resolved));
 
     // Remove market from persistent storage
     e.storage().persistent().remove(&DataKey::Market(market_id));
