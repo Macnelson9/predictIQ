@@ -98,7 +98,7 @@ pub fn remove_guardian(e: &Env, address: Address) -> Result<(), ErrorCode> {
 
     // Initiate removal proposal
     let pending_removal = crate::types::PendingGuardianRemoval {
-        address: address.clone(),
+        target_guardian: address.clone(),
         initiated_at: e.ledger().timestamp(),
         votes_for: Vec::new(e),
     };
@@ -151,7 +151,7 @@ pub fn vote_on_guardian_removal(e: &Env, voter: Address, approve: bool) -> Resul
         // Majority reached, execute removal
         let mut new_guardians: Vec<Guardian> = Vec::new(e);
         for g in guardians.iter() {
-            if g.address != pending_removal.address {
+            if g.address != pending_removal.target_guardian {
                 new_guardians.push_back(g.clone());
             }
         }

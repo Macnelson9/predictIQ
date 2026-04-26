@@ -130,7 +130,7 @@ pub fn set_oracle_result(e: &Env, market_id: u64, outcome: u32) -> Result<(), Er
     let oracle_addr = crate::modules::markets::get_market(e, market_id)
         .map(|m| m.oracle_config.oracle_address)
         .unwrap_or_else(|| e.current_contract_address());
-    crate::modules::events::emit_oracle_result_set(e, market_id, oracle_addr, outcome);
+    crate::modules::events::emit_oracle_result_set(e, market_id, 0u32, oracle_addr, outcome);
 
     Ok(())
 }
