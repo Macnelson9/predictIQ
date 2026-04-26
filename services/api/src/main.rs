@@ -10,6 +10,7 @@ mod email;
 mod handlers;
 mod idempotency;
 mod metrics;
+mod migrations;
 mod newsletter;
 mod pagination;
 mod rate_limit;
