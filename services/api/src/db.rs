@@ -81,6 +81,11 @@ impl Database {
         })
     }
 
+    /// Expose the underlying connection pool for the migration runner.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn statistics_cached(&self) -> anyhow::Result<Statistics> {
         let key = keys::dbq_statistics();
         let ttl = Duration::from_secs(5 * 60);

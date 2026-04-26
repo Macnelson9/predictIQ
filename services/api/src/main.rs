@@ -5,6 +5,7 @@ mod db;
 mod email;
 mod handlers;
 mod metrics;
+mod migrations;
 mod newsletter;
 mod rate_limit;
 mod security;
@@ -59,6 +60,16 @@ async fn main() -> anyhow::Result<()> {
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
     let db = Database::new(&config.database_url, cache.clone(), metrics.clone()).await?;
+
+    // Run pending database migrations at startup
+    let runner = migrations::MigrationRunner::new(db.pool());
+    let applied = runner.run().await?;
+    if applied > 0 {
+        tracing::info!(applied, "database migrations applied");
+    } else {
+        tracing::info!("database schema is up to date");
+    }
+
     let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
 
     // Initialize email service components
