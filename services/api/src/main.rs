@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
-    let db = Database::new(&config.database_url, cache.clone(), metrics.clone()).await?;
+    let db = Database::new(&config.database_url, cache.clone(), metrics.clone(), config.db_pool.query_timeout).await?;
     let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
     
     // Initialize email service components

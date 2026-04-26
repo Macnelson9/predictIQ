@@ -38,6 +38,9 @@ pub struct DbPoolConfig {
     pub idle_timeout: Option<Duration>,
     /// When `None`, sqlx uses its default connection lifetime.
     pub max_lifetime: Option<Duration>,
+    /// Per-query execution timeout. Queries that exceed this are cancelled and
+    /// return an error. Configured via `DB_QUERY_TIMEOUT_SECS` (default: 30).
+    pub query_timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -169,6 +172,13 @@ impl Config {
                 acquire_timeout: db_pool_acquire_timeout,
                 idle_timeout: db_pool_idle_timeout,
                 max_lifetime: db_pool_max_lifetime,
+                query_timeout: Duration::from_secs(
+                    env::var("DB_QUERY_TIMEOUT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(30)
+                        .max(1),
+                ),
             },
             blockchain_rpc_url,
             blockchain_network,
