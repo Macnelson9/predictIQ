@@ -867,15 +867,28 @@ pub async fn blockchain_replay(
 }
 
 pub async fn warm_critical_caches(state: Arc<AppState>) -> anyhow::Result<()> {
-    let _ = state.db.statistics_cached().await?;
-    let _ = state
-        .db
-        .featured_markets_cached(state.config.featured_limit)
-        .await?;
-    let _ = state.blockchain.health_check_cached().await?;
-    let _ = state.blockchain.platform_statistics_cached().await?;
-    let _ = statistics(State(state.clone())).await;
-    let _ = featured_markets(State(state.clone()), Query(PaginationQuery::default())).await;
+    macro_rules! warm {
+        ($name:expr, $fut:expr, $ok:ident, $fail:ident) => {
+            if let Err(e) = $fut.await {
+                $fail += 1;
+                tracing::warn!(endpoint = $name, error = %e, "cache warming failed for endpoint");
+            } else {
+                $ok += 1;
+            }
+        };
+    }
+
+    let (mut succeeded, mut failed) = (0usize, 0usize);
+
+    warm!("db.statistics",             state.db.statistics_cached().map(|r| r.map(|_| ())),                                                                                      succeeded, failed);
+    warm!("db.featured_markets",       state.db.featured_markets_cached(state.config.featured_limit).map(|r| r.map(|_| ())),                                                     succeeded, failed);
+    warm!("blockchain.health",         state.blockchain.health_check_cached().map(|r| r.map(|_| ())),                                                                             succeeded, failed);
+    warm!("blockchain.platform_stats", state.blockchain.platform_statistics_cached().map(|r| r.map(|_| ())),                                                                     succeeded, failed);
+    warm!("api.statistics",            statistics(State(state.clone())).map(|r| r.map(|_| ()).map_err(|e| anyhow::anyhow!("{e:?}"))),                                             succeeded, failed);
+    warm!("api.featured_markets",      featured_markets(State(state.clone()), Query(PaginationQuery::default())).map(|r| r.map(|_| ()).map_err(|e| anyhow::anyhow!("{e:?}"))),   succeeded, failed);
+    warm!("api.content",               content(State(state.clone()), Query(PaginationQuery::default())).map(|r| r.map(|_| ()).map_err(|e| anyhow::anyhow!("{e:?}"))),             succeeded, failed);
+
+    tracing::info!(succeeded, failed, total = succeeded + failed, "cache warming complete");
     Ok(())
 }
 
