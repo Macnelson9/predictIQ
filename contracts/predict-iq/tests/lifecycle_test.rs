@@ -36,7 +36,8 @@ fn test_full_disputed_lifecycle() {
         voting_power: 100, // 100 power
     });
 
-    client.initialize(&admin, &100, &guardians);
+    client.initialize(&admin, &100);
+    client.initialize_guardians(&guardians);
     client.set_governance_token(&gov_token);
 
     // 2. Create market
@@ -123,13 +124,13 @@ fn test_full_disputed_lifecycle() {
 
     // 8. Claim Winnings (User A was right after all)
     let balance_before = token::Client::new(&env, &native_token).balance(&user_a);
-    let claimed = client.claim_winnings(&user_a, &market_id, &native_token);
+    let claimed = client.claim_winnings(&user_a, &market_id);
     assert!(claimed > 1000); // Original 1000 + share of user B's bet - fees
     
     let balance_after = token::Client::new(&env, &native_token).balance(&user_a);
     assert_eq!(balance_after, balance_before + claimed);
 
     // 9. Loser (User B) cannot claim
-    let b_result = client.try_claim_winnings(&user_b, &market_id, &native_token);
+    let b_result = client.try_claim_winnings(&user_b, &market_id);
     assert!(b_result.is_err());
 }

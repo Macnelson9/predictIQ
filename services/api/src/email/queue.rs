@@ -53,8 +53,7 @@ impl EmailQueue {
         };
 
         let mut conn = self.cache.manager.clone();
-        let _: () = conn
-            .zadd(EMAIL_QUEUE_KEY, job_id.to_string(), score)
+        let _: () = conn.zadd(EMAIL_QUEUE_KEY, job_id.to_string(), score)
             .await
             .context("Failed to add job to queue")?;
 
@@ -76,8 +75,7 @@ impl EmailQueue {
             let job_id = Uuid::parse_str(&job_id_str)?;
 
             // Add to processing set
-            let _: () = conn
-                .sadd(EMAIL_PROCESSING_KEY, job_id.to_string())
+            let _: () = conn.sadd(EMAIL_PROCESSING_KEY, job_id.to_string())
                 .await
                 .context("Failed to mark job as processing")?;
 
@@ -95,21 +93,23 @@ impl EmailQueue {
 
         // Remove from processing set
         let mut conn = self.cache.manager.clone();
-        let _: () = conn
-            .srem(EMAIL_PROCESSING_KEY, job_id.to_string())
+        let _: () = conn.srem(EMAIL_PROCESSING_KEY, job_id.to_string())
             .await
             .context("Failed to remove from processing set")?;
 
-        // Track sent event
+        // Track sent event with real recipient
         if let Some(msg_id) = message_id {
+            // Look up recipient from DB to avoid storing empty string
+            let recipient = self
+                .db
+                .email_get_job(job_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|j| j.recipient_email)
+                .unwrap_or_default();
             self.db
-                .email_create_event(
-                    Some(job_id),
-                    Some(&msg_id),
-                    "sent",
-                    "",
-                    serde_json::json!({}),
-                )
+                .email_create_event(Some(job_id), Some(&msg_id), "sent", &recipient, serde_json::json!({}))
                 .await?;
         }
 
@@ -127,8 +127,7 @@ impl EmailQueue {
             if new_attempts < job.max_attempts {
                 // Schedule retry with exponential backoff
                 let backoff_seconds = 2_u64.pow(new_attempts as u32) * 60; // 2min, 4min, 8min...
-                let retry_at =
-                    chrono::Utc::now() + chrono::Duration::seconds(backoff_seconds as i64);
+                let retry_at = chrono::Utc::now() + chrono::Duration::seconds(backoff_seconds as i64);
 
                 self.db
                     .email_update_job_attempts(job_id, new_attempts, Some(error))
@@ -136,14 +135,13 @@ impl EmailQueue {
 
                 // Add to retry queue
                 let mut conn = self.cache.manager.clone();
-                let _: () = conn
-                    .zadd(
-                        EMAIL_RETRY_KEY,
-                        job_id.to_string(),
-                        retry_at.timestamp() as f64,
-                    )
-                    .await
-                    .context("Failed to schedule retry")?;
+                let _: () = conn.zadd(
+                    EMAIL_RETRY_KEY,
+                    job_id.to_string(),
+                    retry_at.timestamp() as f64,
+                )
+                .await
+                .context("Failed to schedule retry")?;
 
                 tracing::warn!(
                     "Email job {} failed (attempt {}/{}), retrying in {}s: {}",
@@ -169,8 +167,7 @@ impl EmailQueue {
 
             // Remove from processing set
             let mut conn = self.cache.manager.clone();
-            let _: () = conn
-                .srem(EMAIL_PROCESSING_KEY, job_id.to_string())
+            let _: () = conn.srem(EMAIL_PROCESSING_KEY, job_id.to_string())
                 .await
                 .context("Failed to remove from processing set")?;
         }
@@ -194,14 +191,12 @@ impl EmailQueue {
         for job_id_str in jobs {
             // Move back to main queue
             let job_id = Uuid::parse_str(&job_id_str)?;
-            let _: () = conn
-                .zadd(EMAIL_QUEUE_KEY, &job_id_str, now)
+            let _: () = conn.zadd(EMAIL_QUEUE_KEY, &job_id_str, now)
                 .await
                 .context("Failed to re-queue job")?;
 
             // Remove from retry queue
-            let _: () = conn
-                .zrem(EMAIL_RETRY_KEY, &job_id_str)
+            let _: () = conn.zrem(EMAIL_RETRY_KEY, &job_id_str)
                 .await
                 .context("Failed to remove from retry queue")?;
 
@@ -237,9 +232,49 @@ impl EmailQueue {
         })
     }
 
+    /// Re-queue any jobs stuck in the processing set (e.g. from a previous crash)
+    pub async fn recover_orphaned_jobs(&self) -> Result<usize> {
+        let mut conn = self.cache.manager.clone();
+        let stale: Vec<String> = conn
+            .smembers(EMAIL_PROCESSING_KEY)
+            .await
+            .context("Failed to read processing set")?;
+
+        let count = stale.len();
+        for job_id_str in stale {
+            let score = chrono::Utc::now().timestamp() as f64;
+            let _: () = conn
+                .zadd(EMAIL_QUEUE_KEY, &job_id_str, score)
+                .await
+                .context("Failed to re-queue orphaned job")?;
+            let _: () = conn
+                .srem(EMAIL_PROCESSING_KEY, &job_id_str)
+                .await
+                .context("Failed to remove orphaned job from processing set")?;
+            tracing::warn!("Recovered orphaned email job: {}", job_id_str);
+        }
+
+        Ok(count)
+    }
+
+    /// Get the number of jobs currently being processed.
+    pub async fn get_processing_count(&self) -> Result<usize> {
+        let mut conn = self.cache.manager.clone();
+        let count: usize = conn
+            .scard(EMAIL_PROCESSING_KEY)
+            .await
+            .context("Failed to get processing count")?;
+        Ok(count)
+    }
+
     /// Background worker to process email queue
     pub async fn start_worker(&self, service: crate::email::EmailService) {
         tracing::info!("Starting email queue worker");
+
+        // Recover any jobs stuck in processing from a previous crash
+        if let Err(e) = self.recover_orphaned_jobs().await {
+            tracing::warn!("Failed to recover orphaned jobs: {}", e);
+        }
 
         loop {
             // Process retries first
@@ -290,7 +325,11 @@ impl EmailQueue {
 
         // Send email
         let message_id = service
-            .send_email(&job.recipient_email, &job.template_name, &job.template_data)
+            .send_email(
+                &job.recipient_email,
+                &job.template_name,
+                &job.template_data,
+            )
             .await?;
 
         // Mark as completed

@@ -17,7 +17,7 @@ pub async fn newsletter_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let ip = extract_client_ip(&headers, connect_info.as_ref());
+    let ip = extract_client_ip(&headers, connect_info.as_ref(), true);
     let config = RateLimitConfig::new(5, Duration::from_secs(3600));
 
     if !limiter.check(&format!("newsletter:{}", ip), &config).await {
@@ -35,7 +35,7 @@ pub async fn contact_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let ip = extract_client_ip(&headers, connect_info.as_ref());
+    let ip = extract_client_ip(&headers, connect_info.as_ref(), true);
     let config = RateLimitConfig::new(3, Duration::from_secs(3600));
 
     if !limiter.check(&format!("contact:{}", ip), &config).await {
@@ -53,14 +53,12 @@ pub async fn analytics_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Use session ID if available, otherwise fall back to IP
+    let ip = extract_client_ip(&headers, connect_info.as_ref(), true);
     let session_id = headers
         .get("x-session-id")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or_else(|| {
-            let ip = extract_client_ip(&headers, connect_info.as_ref());
-            Box::leak(ip.into_boxed_str())
-        });
+        .map(|s| s.to_owned())
+        .unwrap_or(ip);
 
     let config = RateLimitConfig::new(1000, Duration::from_secs(60));
 
@@ -74,7 +72,7 @@ pub async fn analytics_rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
-/// Admin endpoint rate limiting (stricter limits)
+/// Admin endpoint rate limiting (30 req/min per IP)
 pub async fn admin_rate_limit_middleware(
     State(limiter): State<Arc<RateLimiter>>,
     headers: HeaderMap,
@@ -82,7 +80,7 @@ pub async fn admin_rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let ip = extract_client_ip(&headers, connect_info.as_ref());
+    let ip = extract_client_ip(&headers, connect_info.as_ref(), true);
     let config = RateLimitConfig::new(30, Duration::from_secs(60));
 
     if !limiter.check(&format!("admin:{}", ip), &config).await {

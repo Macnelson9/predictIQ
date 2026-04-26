@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "predictiq-api"
+path = "src/main.rs"
+
+[lib]
+name = "predictiq_api"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.7", features = ["macros"] }
@@ -12,16 +20,22 @@ futures = "0.3"
 handlebars = "5.1"
 prometheus = "0.13"
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "streams"] }
+deadpool-redis = { version = "0.15", features = ["rt_tokio_1"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-gzip", "compression-br"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.23"
+opentelemetry = { version = "0.22", features = ["trace"] }
+opentelemetry-otlp = { version = "0.15", features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = "0.14"
 uuid = { version = "1", features = ["v4", "serde"] }
 validator = "0.18"
 tower_governor = "0.8"
@@ -29,3 +43,15 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
+subtle = "2.5"
+ipnet = "2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+testcontainers = { version = "0.23", features = ["tokio"] }
+testcontainers-modules = { version = "0.11", features = ["redis", "tokio"] }
+
+[[bench]]
+name = "api_key_auth"
+harness = false
+[workspace]

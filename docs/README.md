@@ -46,6 +46,7 @@ Learn how to optimize gas usage in PredictIQ smart contracts:
 Security documentation and best practices:
 
 - **[Multisig Emergency Pause](./security/MULTISIG_EMERGENCY_PAUSE.md)** - Emergency pause mechanism documentation
+- **[Architecture - Security Section](../ARCHITECTURE.md#security-architecture)** - Security best practices
 
 ### Quick Reference
 
@@ -73,13 +74,6 @@ Quick reference guides for common tasks:
 - [Project README](../README.md)
 - [Quick Start](./quick-reference/QUICK_START.md)
 - [API Specification](../API_SPEC.md)
-
-### 📚 Reference
-
-- **[Architected Patterns](./ARCHITECTURE.md)** - Overall design patterns
-- **[🔍 Query Implementation & Pagination](./api/QUERY_IMPLEMENTATION_GUIDE.md)** - Paging pattern and details
-- **[⛽ Gas Optimization Guide](./gas/GAS_OPTIMIZATION.md)** - Optimizing contract interaction
-- **[🔒 Security Best Practices](./security/SECURITY_BEST_PRACTICES.md)** - Security guidelines
 
 ### By Topic
 

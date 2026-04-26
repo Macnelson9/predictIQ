@@ -1,3 +1,10 @@
+# Next.js build output
+frontend/.next/
+
+# Dependencies
+node_modules/
+**/node_modules/
+
 /target
 **/*.rs.bk
 .env
@@ -17,9 +24,16 @@ frontend/playwright/.cache/
 
 # Rust build artifacts
 contracts/**/target/
+services/**/target/
 contracts/**/*.wasm
 contracts/**/*.d
 
 # Cargo lock (regenerated per environment)
 Cargo.lock
 
+
+# Performance baselines (stored per branch)
+.performance-baselines/
+
+# Gas benchmark baselines (stored per branch)
+contracts/predict-iq/.gas-benchmarks/

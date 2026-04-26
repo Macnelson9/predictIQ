@@ -1,0 +1,251 @@
+{
+  "dashboard": {
+    "title": "PredictIQ SLO Dashboard",
+    "tags": ["slo", "reliability", "error-budget"],
+    "timezone": "browser",
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "SLO Compliance Overview",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "slo:api_availability:success_rate",
+            "legendFormat": "API Availability"
+          },
+          {
+            "expr": "slo:api_latency_p95:success_rate * 100",
+            "legendFormat": "API Latency P95"
+          },
+          {
+            "expr": "slo:cache_availability:success_rate",
+            "legendFormat": "Cache Availability"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": 0, "color": "red" },
+                { "value": 95, "color": "yellow" },
+                { "value": 99, "color": "green" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Error Budget Remaining",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "slo:api_availability:error_budget_remaining",
+            "legendFormat": "API Availability"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": 0, "color": "red" },
+                { "value": 10, "color": "orange" },
+                { "value": 25, "color": "yellow" },
+                { "value": 50, "color": "green" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Burn Rate (1h/6h/24h)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "slo:api_availability:burn_rate_1h",
+            "legendFormat": "1h burn rate"
+          },
+          {
+            "expr": "slo:api_availability:burn_rate_6h",
+            "legendFormat": "6h burn rate"
+          },
+          {
+            "expr": "slo:api_availability:burn_rate_24h",
+            "legendFormat": "24h burn rate"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Burn Rate (x)",
+            "format": "short"
+          }
+        ],
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [14.4],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "name": "Fast Burn Alert"
+        }
+      },
+      {
+        "id": 4,
+        "title": "API Request Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{status=~\"2..|3..\"}[5m])) / sum(rate(http_requests_total[5m])) * 100",
+            "legendFormat": "Success Rate"
+          },
+          {
+            "expr": "99.9",
+            "legendFormat": "SLO Target"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Success Rate (%)",
+            "format": "percent",
+            "min": 99,
+            "max": 100
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "API Latency P95/P99",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+            "legendFormat": "P95 Latency"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) * 1000",
+            "legendFormat": "P99 Latency"
+          },
+          {
+            "expr": "200",
+            "legendFormat": "P95 Target"
+          },
+          {
+            "expr": "500",
+            "legendFormat": "P99 Target"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Latency (ms)",
+            "format": "ms"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Error Budget Burn Down",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "slo:api_availability:error_budget_remaining",
+            "legendFormat": "Budget Remaining"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Budget Remaining (%)",
+            "format": "percent",
+            "min": 0,
+            "max": 100
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "SLO Violations (Last 7 Days)",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "ALERTS{alertname=~\"SLO.*\"}",
+            "format": "table",
+            "instant": true
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Database Query Latency P95",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(db_query_duration_seconds_bucket[5m])) by (le)) * 1000",
+            "legendFormat": "P95 Query Latency"
+          },
+          {
+            "expr": "50",
+            "legendFormat": "Target"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Latency (ms)",
+            "format": "ms"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Cache Hit Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(redis_commands_total{status=\"hit\"}[5m])) / sum(rate(redis_commands_total[5m])) * 100",
+            "legendFormat": "Hit Rate"
+          },
+          {
+            "expr": "80",
+            "legendFormat": "Target"
+          }
+        ],
+        "yaxes": [
+          {
+            "label": "Hit Rate (%)",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Monthly Error Budget Policy",
+        "type": "text",
+        "content": "## Error Budget Policy\n\n- **100% remaining**: Normal operations\n- **50% remaining**: Review recent changes\n- **25% remaining**: Freeze non-critical deployments\n- **10% remaining**: Freeze all deployments\n- **0% remaining**: Emergency - rollback and incident response\n\n### Burn Rate Thresholds\n\n- **Fast Burn (14.4x)**: Exhausts budget in 2 days → Critical alert\n- **Slow Burn (6.0x)**: Exhausts budget in 5 days → Warning alert"
+      }
+    ],
+    "time": {
+      "from": "now-7d",
+      "to": "now"
+    }
+  }
+}

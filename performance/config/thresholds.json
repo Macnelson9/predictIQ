@@ -34,5 +34,10 @@
   "regression": {
     "max_degradation_percent": 10,
     "alert_threshold_percent": 5
+  },
+  "slo_reference": {
+    "note": "Service Level Objectives are defined in slo.json",
+    "documentation": "See performance/SLO_GUIDE.md for details",
+    "calculator": "Run 'node scripts/calculate-error-budget.js' to check SLO compliance"
   }
 }

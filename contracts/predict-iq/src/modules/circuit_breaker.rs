@@ -103,12 +103,9 @@ pub fn require_closed(e: &Env) -> Result<(), ErrorCode> {
 
 /// Issue #50: Guardian majority can pause without Admin consent.
 pub fn pause(e: &Env) -> Result<(), ErrorCode> {
-    // Try guardian first; fall back to admin
-    let guardian_ok = admin::get_guardian(e)
-        .map(|g| g.try_require_auth().is_ok())
-        .unwrap_or(false);
-
-    if !guardian_ok {
+    if let Some(guardian) = admin::get_guardian(e) {
+        guardian.require_auth();
+    } else {
         admin::require_admin(e)?;
     }
 
@@ -116,11 +113,9 @@ pub fn pause(e: &Env) -> Result<(), ErrorCode> {
 }
 
 pub fn unpause(e: &Env) -> Result<(), ErrorCode> {
-    let guardian_ok = admin::get_guardian(e)
-        .map(|g| g.try_require_auth().is_ok())
-        .unwrap_or(false);
-
-    if !guardian_ok {
+    if let Some(guardian) = admin::get_guardian(e) {
+        guardian.require_auth();
+    } else {
         admin::require_admin(e)?;
     }
 

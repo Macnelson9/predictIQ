@@ -126,8 +126,9 @@ fn test_stake_conservation_single_bet() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 100);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 100);
+    // Net stored after 1% fee: 100 - 1 = 99
+    assert_eq!(market.total_staked, 99);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 99);
 }
 
 #[test]
@@ -175,8 +176,9 @@ fn test_stake_conservation_multiple_bets_same_outcome() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 150);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 150);
+    // Net stored after 1% fee: 100 - 1 = 99, 50 - 0 = 50 (fee truncates to 0 for small amounts)
+    assert_eq!(market.total_staked, 149);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 149);
 }
 
 #[test]
@@ -223,8 +225,9 @@ fn test_stake_conservation_multiple_bets_different_outcomes() {
     assert_stake_conservation(&env, &client, market_id);
 
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 175);
-    assert_eq!(client.get_outcome_stake(&market_id, &0), 100);
+    // Net stored after 1% fee: 100 - 1 = 99, 75 - 0 = 75
+    assert_eq!(market.total_staked, 174);
+    assert_eq!(client.get_outcome_stake(&market_id, &0), 99);
     assert_eq!(client.get_outcome_stake(&market_id, &1), 75);
 }
 
@@ -343,7 +346,7 @@ fn test_stake_conservation_partial_refunds() {
 
     // Verify partial state
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 50); // bettor2's stake still there
+    assert_eq!(market.total_staked, 50); // bettor2's net stake still there (50 - 0 fee)
     assert_eq!(client.get_outcome_stake(&market_id, &0), 0);
     assert_eq!(client.get_outcome_stake(&market_id, &1), 50);
 }
@@ -689,7 +692,8 @@ fn test_stake_conservation_valid_bet_maintains_conservation() {
 
     // Verify conservation holds
     let market = client.get_market(&market_id).unwrap();
-    assert_eq!(market.total_staked, 100);
+    // Net stored after 1% fee: 100 - 1 = 99
+    assert_eq!(market.total_staked, 99);
 }
 
 #[test]

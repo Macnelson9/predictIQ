@@ -1,0 +1,105 @@
+rules:
+  - id: hardcoded-stellar-secret
+    pattern: |
+      "S[A-Z0-9]{55}"
+    message: Hardcoded Stellar secret key detected
+    severity: ERROR
+    languages: [rust, typescript, javascript]
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: sql-injection-risk
+    patterns:
+      - pattern: |
+          format!("... {} ...", $VAR)
+      - pattern-inside: |
+          sqlx::query(...)
+    message: Potential SQL injection - use parameterized queries
+    severity: ERROR
+    languages: [rust]
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+
+  - id: unsafe-deserialization
+    pattern: |
+      serde_json::from_str($INPUT)
+    message: Ensure input is validated before deserialization
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+
+  - id: missing-auth-check
+    patterns:
+      - pattern: |
+          pub async fn $FUNC(...) -> ... {
+            ...
+          }
+      - pattern-not-inside: |
+          pub async fn $FUNC(...) -> ... {
+            ...
+            $AUTH_CHECK
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (resolve_market|admin_.*|delete_.*|update_.*)
+    message: Admin function may be missing authentication check
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      category: security
+      cwe: "CWE-306: Missing Authentication"
+
+  - id: weak-random
+    pattern: |
+      rand::random()
+    message: Use cryptographically secure random for security-sensitive operations
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      category: security
+      cwe: "CWE-338: Use of Cryptographically Weak PRNG"
+
+  - id: eval-usage
+    pattern: eval(...)
+    message: Avoid eval() - it can execute arbitrary code
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  - id: dangerouslySetInnerHTML
+    pattern: dangerouslySetInnerHTML={{...}}
+    message: Avoid dangerouslySetInnerHTML - XSS risk
+    severity: WARNING
+    languages: [typescript, javascript]
+    metadata:
+      category: security
+      cwe: "CWE-79: Cross-site Scripting"
+
+  - id: console-log-production
+    pattern: console.log(...)
+    message: Remove console.log in production code
+    severity: INFO
+    languages: [typescript, javascript]
+    paths:
+      include:
+        - "*/src/*"
+      exclude:
+        - "*/test/*"
+        - "*/*.test.*"
+    metadata:
+      category: best-practice
+
+  - id: todo-fixme-comments
+    pattern-regex: (TODO|FIXME|HACK|XXX)
+    message: Address TODO/FIXME comments before merging
+    severity: INFO
+    languages: [rust, typescript, javascript]
+    metadata:
+      category: best-practice

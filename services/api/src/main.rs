@@ -1,18 +1,27 @@
+mod audit;
+mod audit_middleware;
 mod blockchain;
 mod cache;
+mod compression;
 mod config;
+mod correlation;
 mod db;
 mod email;
 mod handlers;
+mod idempotency;
 mod metrics;
 mod migrations;
 mod newsletter;
+mod pagination;
 mod rate_limit;
 mod security;
+mod tracing_config;
 mod validation;
+mod versioning;
 
 use std::sync::Arc;
 
+use audit::AuditLogger;
 use axum::{
     middleware,
     routing::{get, post},
@@ -28,8 +37,7 @@ use newsletter::IpRateLimiter;
 use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
 use tokio::net::TcpListener;
 use tower_http::{
-    compression::CompressionLayer,
-    cors::{Any, CorsLayer},
+    cors::CorsLayer,
     trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -45,37 +53,33 @@ pub struct AppState {
     pub(crate) email_service: EmailService,
     pub(crate) email_queue: EmailQueue,
     pub(crate) webhook_handler: WebhookHandler,
+    pub(crate) audit_logger: AuditLogger,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let config = Config::from_env();
+    
+    // Initialize distributed tracing
+    tracing_config::init_tracing(
+        "predictiq-api",
+        env!("CARGO_PKG_VERSION"),
+        config.otlp_endpoint.clone(),
+        config.trace_sample_rate,
+    )?;
+
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
-    let db = Database::new(&config.database_url, cache.clone(), metrics.clone()).await?;
-
-    // Run pending database migrations at startup
-    let runner = migrations::MigrationRunner::new(db.pool());
-    let applied = runner.run().await?;
-    if applied > 0 {
-        tracing::info!(applied, "database migrations applied");
-    } else {
-        tracing::info!("database schema is up to date");
-    }
-
+    let db = Database::new(&config.database_url, cache.clone(), metrics.clone(), config.db_pool.query_timeout).await?;
     let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
-
+    
     // Initialize email service components
     let email_service = EmailService::new(config.clone())?;
     let email_queue = EmailQueue::new(cache.clone(), db.clone());
     let webhook_handler = WebhookHandler::new(db.clone());
+    
+    // Initialize audit logger
+    let audit_logger = AuditLogger::new(db.pool());
 
     let bind_addr = config.bind_addr;
 
@@ -83,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(RateLimiter::new());
     let api_key_auth = Arc::new(ApiKeyAuth::new(config.api_keys.clone()));
     let ip_whitelist = Arc::new(IpWhitelist::new(config.admin_whitelist_ips.clone()));
+    let config_trust_proxy = config.trust_proxy;
 
     // Start rate limiter cleanup task
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -94,72 +99,117 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Cleanup expired pending newsletter subscriptions hourly
+    let db_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let ttl = db_cleanup.config.newsletter_token_ttl_secs;
+            match db_cleanup.db.newsletter_delete_expired_pending(ttl).await {
+                Ok(n) if n > 0 => tracing::info!("[newsletter] cleaned up {n} expired pending subscriptions"),
+                Err(e) => tracing::warn!("[newsletter] cleanup error: {e}"),
+                _ => {}
+            }
+        }
+    });
+
     let state = Arc::new(AppState {
         config,
-        cache,
+        cache: cache.clone(),
         db,
         blockchain,
         metrics,
-        newsletter_rate_limiter: IpRateLimiter::default(),
+        newsletter_rate_limiter: IpRateLimiter::new(cache.clone()),
         email_service: email_service.clone(),
         email_queue: email_queue.clone(),
         webhook_handler: webhook_handler.clone(),
+        audit_logger,
     });
+
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     Arc::new(state.blockchain.clone()).start_background_tasks();
 
-    // Start email queue worker in background
+    // Start email queue worker in background with shutdown awareness
     let queue_worker = email_queue.clone();
     let service_worker = email_service.clone();
+    let mut shutdown_rx = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        queue_worker.start_worker(service_worker).await;
+        tokio::select! {
+            _ = queue_worker.start_worker(service_worker) => {},
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Email queue worker shutting down");
+            }
+        }
     });
 
     if let Err(err) = handlers::warm_critical_caches(state.clone()).await {
         tracing::warn!("cache warming skipped: {err}");
     }
 
-    // CORS configuration
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // CORS configuration - restrict to configured origins
+    let allowed_origins = if state.config.api_keys.is_empty() {
+        // Dev fallback: allow any
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+            .allow_origin(
+                state
+                    .config
+                    .base_url
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap_or(axum::http::HeaderValue::from_static("*")),
+            )
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+    };
 
-    // Public routes (with global rate limiting)
+    // Public routes (with global rate limiting, security headers, and request validation)
     let public_routes = Router::new()
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
-        .route("/api/blockchain/health", get(handlers::blockchain_health))
+        .route("/api/v1/blockchain/health", get(handlers::blockchain_health))
         .route(
-            "/api/blockchain/markets/:market_id",
+            "/api/v1/blockchain/markets/:market_id",
             get(handlers::blockchain_market_data),
         )
         .route(
-            "/api/blockchain/stats",
+            "/api/v1/blockchain/stats",
             get(handlers::blockchain_platform_stats),
         )
         .route(
-            "/api/blockchain/users/:user/bets",
+            "/api/v1/blockchain/users/:user/bets",
             get(handlers::blockchain_user_bets),
         )
         .route(
-            "/api/blockchain/oracle/:market_id",
+            "/api/v1/blockchain/oracle/:market_id",
             get(handlers::blockchain_oracle_result),
         )
         .route(
-            "/api/blockchain/tx/:tx_hash",
+            "/api/v1/blockchain/tx/:tx_hash",
             get(handlers::blockchain_tx_status),
         )
-        .route("/api/statistics", get(handlers::statistics))
-        .route("/api/markets/featured", get(handlers::featured_markets))
-        .route("/api/content", get(handlers::content))
+        .route("/api/v1/statistics", get(handlers::statistics))
+        .route("/api/v1/markets/featured", get(handlers::featured_markets))
+        .route("/api/v1/content", get(handlers::content))
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(versioning::versioning_middleware))
+        .layer(middleware::from_fn(security::security_headers_middleware))
+        .layer(middleware::from_fn(validation::request_validation_middleware))
+        .layer(middleware::from_fn(validation::request_size_validation_middleware))
         .layer(middleware::from_fn_with_state(
-            rate_limiter.clone(),
+            (rate_limiter.clone(), security::TrustProxy(config_trust_proxy)),
             security::global_rate_limit_middleware,
         ))
         .with_state(state.clone());
 
-    // Newsletter routes (with specific rate limiting)
+    // Newsletter routes (with specific rate limiting and content-type validation)
     let newsletter_routes = Router::new()
         .route(
             "/api/v1/newsletter/subscribe",
@@ -171,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/newsletter/unsubscribe",
-            axum::routing::delete(handlers::newsletter_unsubscribe),
+            get(handlers::newsletter_unsubscribe),
         )
         .route(
             "/api/v1/newsletter/gdpr/export",
@@ -181,41 +231,109 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/newsletter/gdpr/delete",
             axum::routing::delete(handlers::newsletter_gdpr_delete),
         )
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            idempotency::idempotency_middleware,
+        ))
+        .layer(middleware::from_fn(validation::content_type_validation_middleware))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
             rate_limit::newsletter_rate_limit_middleware,
         ))
         .with_state(state.clone());
 
-    // Admin routes (with API key auth, IP whitelist, and rate limiting)
+    // SendGrid webhook route — authenticated by provider signature, not admin API key
+    let webhook_routes = Router::new()
+        .route(
+            "/webhooks/sendgrid",
+            post(handlers::sendgrid_webhook),
+        )
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(security::security_headers_middleware))
+        .with_state(state.clone());
+
+    // Admin routes (with API key auth, IP whitelist, rate limiting, and audit logging)
     let admin_routes = Router::new()
         .route(
-            "/api/markets/:market_id/resolve",
+            "/api/v1/markets/:market_id/resolve",
             post(handlers::resolve_market),
         )
-        // Email service endpoints
+        .route(
+            "/api/blockchain/replay",
+            post(handlers::blockchain_replay),
+        )
         .route(
             "/api/v1/email/preview/:template_name",
             get(handlers::email_preview),
         )
-        .route("/api/v1/email/test", post(handlers::email_send_test))
-        .route("/api/v1/email/analytics", get(handlers::email_analytics))
+        .route(
+            "/api/v1/email/test",
+            post(handlers::email_send_test),
+        )
+        .route(
+            "/api/v1/email/analytics",
+            get(handlers::email_analytics),
+        )
         .route(
             "/api/v1/email/queue/stats",
             get(handlers::email_queue_stats),
         )
-        .route("/webhooks/sendgrid", post(handlers::sendgrid_webhook))
+        .route(
+            "/api/v1/audit/logs",
+            get(handlers::audit_logs),
+        )
+        .route(
+            "/api/v1/audit/statistics",
+            get(handlers::audit_statistics),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            idempotency::idempotency_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            (ip_whitelist.clone(), security::TrustProxy(config_trust_proxy)),
+            security::ip_whitelist_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            api_key_auth.clone(),
+            security::api_key_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            rate_limiter.clone(),
+            rate_limit::admin_rate_limit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_middleware::audit_logging_middleware,
+        ))
+        .layer(middleware::from_fn(correlation::correlation_id_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
 
-    let app = public_routes
+    let app = Router::new()
+        .merge(public_routes)
         .merge(newsletter_routes)
+        .merge(webhook_routes)
         .merge(admin_routes)
-        .layer(cors);
+        .layer(compression::compression_layer())
+        .layer(allowed_origins);
 
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!("API listening on {bind_addr}");
-    axum::serve(listener, app).await?;
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C handler");
+            tracing::info!("Shutdown signal received");
+            let _ = shutdown_tx.send(());
+            tracing_config::shutdown_tracing();
+        })
+        .await?;
 
     Ok(())
 }

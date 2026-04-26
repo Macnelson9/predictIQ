@@ -1,35 +1,33 @@
 #![cfg(test)]
 
-//! Comprehensive tests for Oracle price validation, with focus on confidence threshold rounding.
-//!
-//! # Issue #260: Confidence Threshold Rounding
-//!
-//! The confidence validation formula is: `max_conf = (price_abs * max_confidence_bps) / 10000`
-//!
-//! ## Problem
-//! Integer division can introduce bias for small prices:
-//! - price=1, bps=500 (5%): (1 * 500) / 10000 = 0 (truncates, should be ~0.05)
-//! - price=10, bps=100 (1%): (10 * 100) / 10000 = 0 (truncates, should be ~0.1)
-//! - price=100, bps=100 (1%): (100 * 100) / 10000 = 1 (correct)
-//!
-//! This causes a **downward bias** for small prices, making it harder to accept prices
-//! with any confidence interval at very small valuations.
-//!
-//! ## Potential Solutions
-//! 1. **Ceiling division**: Use `(price * bps + 9999) / 10000` to round up
-//! 2. **Fixed-point math**: Scale up before division to preserve precision
-//! 3. **Reverse formula**: Check `(price * bps) >= (conf * 10000)` to avoid division
-//!
-//! ## Test Coverage
-//! - `test_confidence_rounding_small_prices`: Tests 1-100 range prices
-//! - `test_confidence_rounding_large_prices`: Tests million+ range prices
-//! - `test_confidence_rounding_edge_cases_low_prices`: Targets specific rounding boundaries
-//! - `test_confidence_rounding_negative_prices`: Validates absolute value handling
-//! - `test_confidence_rounding_boundary_conditions`: Documents exact rounding behavior
+// Comprehensive tests for Oracle price validation, with focus on confidence threshold rounding.
+//
+// # Issue #260: Confidence Threshold Rounding
+//
+// The confidence validation formula is: `max_conf = (price_abs * max_confidence_bps) / 10000`
+//
+// ## Problem
+// Integer division can introduce bias for small prices:
+// - price=1, bps=500 (5%): (1 * 500) / 10000 = 0 (truncates, should be ~0.05)
+// - price=10, bps=100 (1%): (10 * 100) / 10000 = 0 (truncates, should be ~0.1)
+// - price=100, bps=100 (1%): (100 * 100) / 10000 = 1 (correct)
+//
+// This causes a **downward bias** for small prices, making it harder to accept prices
+// with any confidence interval at very small valuations.
+//
+// ## Potential Solutions
+// 1. **Ceiling division**: Use `(price * bps + 9999) / 10000` to round up
+// 2. **Fixed-point math**: Scale up before division to preserve precision
+// 3. **Reverse formula**: Check `(price * bps) >= (conf * 10000)` to avoid division
+//
+// ## Test Coverage
+// - `test_confidence_rounding_small_prices`: Tests 1-100 range prices
+// - `test_confidence_rounding_large_prices`: Tests million+ range prices
+// - `test_confidence_rounding_edge_cases_low_prices`: Targets specific rounding boundaries
+// - `test_confidence_rounding_negative_prices`: Validates absolute value handling
+// - `test_confidence_rounding_boundary_conditions`: Documents exact rounding behavior
 
 use super::oracles::*;
-use crate::errors::ErrorCode;
-use crate::types::OracleConfig;
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn test_config(e: &Env) -> OracleConfig {
@@ -91,6 +89,22 @@ fn test_reject_stale_price() {
 
     let result = validate_price(&e, &price, &config);
     assert_eq!(result, Err(ErrorCode::StalePrice));
+}
+
+#[test]
+fn test_accept_price_at_exact_staleness_boundary() {
+    let e = Env::default();
+
+    let config = test_config(&e);
+    let price = PythPrice {
+        price: 100000,
+        conf: 1000, // 1% of price - within 2% threshold
+        expo: -2,
+        publish_time: e.ledger().timestamp() as i64 - 300, // exactly 300 seconds old (max_staleness_seconds)
+    };
+
+    let result = validate_price(&e, &price, &config);
+    assert!(result.is_ok(), "Price at exact staleness boundary (age == max_staleness_seconds) should be accepted");
 }
 
 #[test]
@@ -165,33 +179,33 @@ fn test_validate_price_rejects_negative_publish_time() {
 // =============================================================================
 // Issue #261: Multi-Oracle Keying Tests
 // =============================================================================
-//!
-//! # Issue #261: Multi-Oracle Keying & Collision Prevention
-//!
-//! The oracle result storage uses a composite key: `OracleData::Result(market_id, oracle_id)`
-//!
-//! ## Problem
-//! Without proper testing, the following risks exist:
-//! 1. **Key Collisions**: Different (market_id, oracle_id) pairs could hash to same storage location
-//! 2. **Data Isolation Failure**: Retrieving (market_id=1, oracle_id=1) could return data from (market_id=1, oracle_id=2)
-//! 3. **Missing Multi-Oracle Support**: No tests verifying multiple oracle IDs per market work correctly
-//! 4. **Boundary Weaknesses**: Untested edge cases with large market_ids, large oracle_ids, or both
-//!
-//! ## Storage Key Structure
-//! ```
-//! OracleData::Result(market_id: u64, oracle_id: u32) -> outcome: u32
-//! OracleData::LastUpdate(market_id: u64, oracle_id: u32) -> timestamp: u64
-//! ```
-//!
-//! ## Test Coverage
-//! - `test_multi_oracle_basic_storage_retrieval`: Verify store/retrieve for (market_id, oracle_id) pairs
-//! - `test_multi_oracle_isolation_same_market`: Ensure different oracle_ids in same market don't collide
-//! - `test_multi_oracle_isolation_different_markets`: Ensure same oracle_id in different markets don't collide
-//! - `test_multi_oracle_matrix_combinations`: Table-driven tests of all combinations
-//! - `test_multi_oracle_large_ids`: Tests with maximum/boundary u64 and u32 values
-//! - `test_multi_oracle_sequential_updates`: Ensure updates don't affect other oracles
-//! - `test_multi_oracle_timestamp_independence`: Verify timestamps are independent per (market_id, oracle_id)
-//! - `test_multi_oracle_collision_mitigation`: Demonstrates the fix prevents theoretical collisions
+//
+// # Issue #261: Multi-Oracle Keying & Collision Prevention
+//
+// The oracle result storage uses a composite key: `OracleData::Result(market_id, oracle_id)`
+//
+// ## Problem
+// Without proper testing, the following risks exist:
+// 1. **Key Collisions**: Different (market_id, oracle_id) pairs could hash to same storage location
+// 2. **Data Isolation Failure**: Retrieving (market_id=1, oracle_id=1) could return data from (market_id=1, oracle_id=2)
+// 3. **Missing Multi-Oracle Support**: No tests verifying multiple oracle IDs per market work correctly
+// 4. **Boundary Weaknesses**: Untested edge cases with large market_ids, large oracle_ids, or both
+//
+// ## Storage Key Structure
+// ```
+// OracleData::Result(market_id: u64, oracle_id: u32) -> outcome: u32
+// OracleData::LastUpdate(market_id: u64, oracle_id: u32) -> timestamp: u64
+// ```
+//
+// ## Test Coverage
+// - `test_multi_oracle_basic_storage_retrieval`: Verify store/retrieve for (market_id, oracle_id) pairs
+// - `test_multi_oracle_isolation_same_market`: Ensure different oracle_ids in same market don't collide
+// - `test_multi_oracle_isolation_different_markets`: Ensure same oracle_id in different markets don't collide
+// - `test_multi_oracle_matrix_combinations`: Table-driven tests of all combinations
+// - `test_multi_oracle_large_ids`: Tests with maximum/boundary u64 and u32 values
+// - `test_multi_oracle_sequential_updates`: Ensure updates don't affect other oracles
+// - `test_multi_oracle_timestamp_independence`: Verify timestamps are independent per (market_id, oracle_id)
+// - `test_multi_oracle_collision_mitigation`: Demonstrates the fix prevents theoretical collisions
 
 /// Basic sanity test: Store and retrieve oracle results for a single (market_id, oracle_id) pair.
 #[test]
@@ -570,4 +584,269 @@ mod pyth_integration_tests {
         let result = fetch_pyth_price(&e, &config);
         assert_eq!(result, Err(crate::errors::ErrorCode::OracleFailure));
     }
+
+    // -------------------------------------------------------------------------
+    // Oracle failure path / retry cadence tests
+    //
+    // These tests use attempt_oracle_resolution at the contract level so they
+    // exercise the full path: fetch → validate → write → market state update.
+    // A bad feed_id is the simplest way to force OracleFailure without a mock
+    // that panics, because decode_feed_id rejects it before the cross-contract
+    // call, giving a deterministic failure with no partial storage writes.
+    // -------------------------------------------------------------------------
+
+    use crate::{PredictIQ, PredictIQClient};
+    use crate::types::{MarketStatus, MarketTier};
+    use soroban_sdk::{testutils::Ledger as _, Vec};
+
+    fn setup_contract_with_bad_oracle(e: &Env) -> (PredictIQClient<'static>, u64) {
+        e.mock_all_auths();
+        let contract_id = e.register(PredictIQ, ());
+        let client = PredictIQClient::new(e, &contract_id);
+        let admin = Address::generate(e);
+        client.initialize(&admin, &100);
+
+        // Oracle config with an invalid feed_id — fetch_pyth_price will return
+        // OracleFailure before touching any storage.
+        let bad_config = OracleConfig {
+            oracle_address: Address::generate(e),
+            feed_id: String::from_str(e, "not_hex"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+        let token = Address::generate(e);
+        let options = Vec::from_array(e, [
+            soroban_sdk::String::from_str(e, "Yes"),
+            soroban_sdk::String::from_str(e, "No"),
+        ]);
+        let market_id = client.create_market(
+            &admin,
+            &soroban_sdk::String::from_str(e, "Oracle test market"),
+            &options,
+            &1000,
+            &2000,
+            &bad_config,
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        );
+        (client, market_id)
+    }
+
+    /// A single oracle failure must return OracleFailure and leave the market Active.
+    #[test]
+    fn test_oracle_failure_leaves_market_active() {
+        let e = Env::default();
+        let (client, market_id) = setup_contract_with_bad_oracle(&e);
+
+        e.ledger().set_timestamp(2000); // at resolution deadline
+
+        let result = client.try_attempt_oracle_resolution(&market_id);
+        assert_eq!(result, Err(Ok(crate::errors::ErrorCode::OracleFailure)));
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Active);
+        assert!(market.winning_outcome.is_none());
+        assert!(market.pending_resolution_timestamp.is_none());
+    }
+
+    /// Repeated oracle failures must never mutate market state — status stays
+    /// Active and no partial oracle storage is written on any iteration.
+    #[test]
+    fn test_repeated_oracle_failures_no_partial_state() {
+        let e = Env::default();
+        let (client, market_id) = setup_contract_with_bad_oracle(&e);
+
+        e.ledger().set_timestamp(2000);
+
+        for _ in 0..5 {
+            let result = client.try_attempt_oracle_resolution(&market_id);
+            assert_eq!(result, Err(Ok(crate::errors::ErrorCode::OracleFailure)));
+        }
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Active,
+            "market must remain Active after repeated oracle failures");
+        assert!(market.winning_outcome.is_none(),
+            "winning_outcome must not be set after oracle failures");
+        assert!(market.pending_resolution_timestamp.is_none(),
+            "pending_resolution_timestamp must not be set after oracle failures");
+
+        // Oracle storage keys must also be absent.
+        assert!(client.get_oracle_result(&market_id, &0).is_none(),
+            "oracle result key must not exist after failed attempts");
+        assert!(client.get_oracle_last_update(&market_id, &0).is_none(),
+            "oracle last_update key must not exist after failed attempts");
+    }
+
+    /// After N failures the market must still accept a successful resolution
+    /// once a valid oracle result is injected — verifying retry cadence works.
+    #[test]
+    fn test_oracle_retry_succeeds_after_failures() {
+        let e = Env::default();
+        e.mock_all_auths();
+
+        let contract_id = e.register(PredictIQ, ());
+        let client = PredictIQClient::new(&e, &contract_id);
+        let admin = Address::generate(&e);
+        client.initialize(&admin, &100);
+
+        // Start with a bad oracle config so the first attempts fail.
+        let bad_config = OracleConfig {
+            oracle_address: Address::generate(&e),
+            feed_id: String::from_str(&e, "not_hex"),
+            min_responses: 1,
+            max_staleness_seconds: 3600,
+            max_confidence_bps: 500,
+        };
+        let token = Address::generate(&e);
+        let options = Vec::from_array(&e, [
+            soroban_sdk::String::from_str(&e, "Yes"),
+            soroban_sdk::String::from_str(&e, "No"),
+        ]);
+        let market_id = client.create_market(
+            &admin,
+            &soroban_sdk::String::from_str(&e, "Retry market"),
+            &options,
+            &1000,
+            &2000,
+            &bad_config,
+            &MarketTier::Basic,
+            &token,
+            &0,
+            &0,
+        );
+
+        e.ledger().set_timestamp(2000);
+
+        // Three failures.
+        for _ in 0..3 {
+            assert!(client.try_attempt_oracle_resolution(&market_id).is_err());
+        }
+
+        // Inject a valid result via the admin shortcut (simulates oracle feed recovery).
+        client.set_oracle_result(&market_id, &0, &0);
+        // Now resolve_market (admin path) must succeed — market was never corrupted.
+        client.resolve_market(&market_id, &0);
+
+        let market = client.get_market(&market_id).unwrap();
+        assert_eq!(market.status, MarketStatus::Resolved);
+        assert_eq!(market.winning_outcome, Some(0));
+    }
+
+    /// A stale price (publish_time too old) must return StalePrice and leave
+    /// no oracle storage written — validate_price fires before any set().
+    #[test]
+    fn test_stale_oracle_price_leaves_no_partial_storage() {
+        let e = Env::default();
+        e.mock_all_auths();
+
+        // Register the mock Pyth contract — it returns publish_time=1_700_000_000
+        // which is far in the past relative to the ledger timestamp we'll set.
+        let pyth_addr = e.register(MockPythContract, ());
+
+        let config = OracleConfig {
+            oracle_address: pyth_addr,
+            feed_id: valid_feed_id(&e),
+            min_responses: 1,
+            max_staleness_seconds: 60, // only 60s tolerance
+            max_confidence_bps: 500,
+        };
+
+        // Set ledger timestamp far ahead so publish_time=1_700_000_000 is stale.
+        e.ledger().set_timestamp(1_700_010_000); // 10_000s after publish_time
+
+        let result = crate::modules::oracles::resolve_with_pyth(&e, 1u64, 0u32, &config);
+        assert_eq!(result, Err(crate::errors::ErrorCode::StalePrice));
+
+        // No oracle storage must have been written.
+        assert!(crate::modules::oracles::get_oracle_result(&e, 1u64, 0u32).is_none(),
+            "oracle result must not be stored after stale price rejection");
+        assert!(crate::modules::oracles::get_last_update(&e, 1u64, 0u32).is_none(),
+            "oracle last_update must not be stored after stale price rejection");
+    }
+}
+
+// =============================================================================
+// Issue #9: set_oracle_result with oracle_id — no-collision tests
+// =============================================================================
+
+/// Verify that set_oracle_result stores results under the correct (market_id, oracle_id)
+/// composite key and that different oracle_ids for the same market are fully isolated.
+#[test]
+fn test_set_oracle_result_uses_oracle_id_key() {
+    let e = Env::default();
+    let market_id = 42u64;
+
+    // Oracle 0 posts outcome 0, oracle 1 posts outcome 1
+    e.storage().persistent().set(&OracleData::Result(market_id, 0), &0u32);
+    e.storage().persistent().set(&OracleData::Result(market_id, 1), &1u32);
+
+    let r0: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 0));
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 1));
+
+    assert_eq!(r0, Some(0), "oracle 0 result should be 0");
+    assert_eq!(r1, Some(1), "oracle 1 result should be 1");
+}
+
+/// Verify that updating one oracle's result does not overwrite another oracle's result.
+#[test]
+fn test_oracle_results_are_independent_per_oracle_id() {
+    let e = Env::default();
+    let market_id = 7u64;
+
+    // Store initial results for three oracles
+    for oracle_id in 0u32..3 {
+        e.storage()
+            .persistent()
+            .set(&OracleData::Result(market_id, oracle_id), &oracle_id);
+    }
+
+    // Update oracle 1 only
+    e.storage()
+        .persistent()
+        .set(&OracleData::Result(market_id, 1), &99u32);
+
+    // Oracle 0 and 2 must be unchanged
+    let r0: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 0));
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 1));
+    let r2: Option<u32> = e.storage().persistent().get(&OracleData::Result(market_id, 2));
+
+    assert_eq!(r0, Some(0), "oracle 0 must not be affected by oracle 1 update");
+    assert_eq!(r1, Some(99), "oracle 1 should reflect the update");
+    assert_eq!(r2, Some(2), "oracle 2 must not be affected by oracle 1 update");
+}
+
+/// Verify that the same oracle_id in different markets stores independently.
+#[test]
+fn test_oracle_results_are_independent_per_market_id() {
+    let e = Env::default();
+    let oracle_id = 0u32;
+
+    e.storage().persistent().set(&OracleData::Result(1u64, oracle_id), &10u32);
+    e.storage().persistent().set(&OracleData::Result(2u64, oracle_id), &20u32);
+
+    let r1: Option<u32> = e.storage().persistent().get(&OracleData::Result(1u64, oracle_id));
+    let r2: Option<u32> = e.storage().persistent().get(&OracleData::Result(2u64, oracle_id));
+
+    assert_eq!(r1, Some(10));
+    assert_eq!(r2, Some(20));
+}
+
+/// Verify get_oracle_result returns None for an oracle_id that has not posted yet.
+#[test]
+fn test_get_oracle_result_returns_none_for_unset_oracle() {
+    let e = Env::default();
+    let result = get_oracle_result(&e, 999u64, 5u32);
+    assert_eq!(result, None);
+}
+
+/// Verify get_last_update returns None before any result is stored.
+#[test]
+fn test_get_last_update_returns_none_before_set() {
+    let e = Env::default();
+    let ts = get_last_update(&e, 1u64, 0u32);
+    assert_eq!(ts, None);
 }

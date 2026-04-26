@@ -50,3 +50,16 @@ pub fn set_governance_token(e: &Env, token: Address) -> Result<(), ErrorCode> {
         .set(&ConfigKey::GovernanceToken, &token);
     Ok(())
 }
+
+pub fn set_fee_admin(e: &Env, fee_admin: Address) -> Result<(), ErrorCode> {
+    require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::GuardianAccount, &fee_admin);
+    bump_gov_ttl(e, &ConfigKey::GuardianAccount);
+    Ok(())
+}
+
+pub fn get_fee_admin(e: &Env) -> Option<Address> {
+    e.storage().persistent().get(&ConfigKey::GuardianAccount)
+}

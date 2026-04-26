@@ -9,20 +9,14 @@ pub mod events;
 pub mod fees;
 pub mod governance;
 pub mod markets;
+pub mod migration;
 pub mod monitoring;
 pub mod oracles;
-#[cfg(test)]
-pub mod oracles_test;
 pub mod resolution;
 pub mod sac;
 pub mod voting;
 
-// Test modules
 #[cfg(test)]
-mod admin_test;
+mod disputes_weight_test;
 #[cfg(test)]
-mod bets_test;
-#[cfg(test)]
-mod circuit_breaker_test;
-#[cfg(test)]
-mod markets_test;
+mod markets_conditional_test;

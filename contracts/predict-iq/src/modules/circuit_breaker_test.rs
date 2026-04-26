@@ -66,7 +66,6 @@ fn test_pause_blocks_operations() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -109,7 +108,6 @@ fn test_unpause_allows_operations() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -175,7 +173,6 @@ fn test_require_closed_when_open() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 

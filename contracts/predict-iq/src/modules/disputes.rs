@@ -1,8 +1,9 @@
 use crate::errors::ErrorCode;
-use crate::modules::markets;
-use crate::types::{ConfigKey, MarketStatus, PayoutMode};
-use soroban_sdk::{Address, Env};
+use crate::modules::{markets, resolution};
+use crate::types::{ConfigKey, MarketStatus};
+use soroban_sdk::{contracttype, Address, Env};
 
+#[contracttype]
 #[derive(Clone)]
 pub struct ResolutionMetrics {
     pub winner_count: u32,
@@ -22,15 +23,15 @@ pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) -> Result<
     let pending_ts = market
         .pending_resolution_timestamp
         .ok_or(ErrorCode::ResolutionNotReady)?;
-    if e.ledger().timestamp() >= pending_ts + 172_800 {
-        // 48h window (Issue #8)
+    if e.ledger().timestamp() >= pending_ts + resolution::get_dispute_window() {
+        // Issue #8: window is now configurable (default 72h)
         return Err(ErrorCode::DisputeWindowClosed);
     }
 
     market.status = MarketStatus::Disputed;
     market.dispute_timestamp = Some(e.ledger().timestamp());
-    // Extend resolution deadline for voting period
-    market.resolution_deadline += 86400 * 3; // 3 days extension
+    // Extend resolution deadline by the full dispute window duration
+    market.resolution_deadline += resolution::get_dispute_window();
     let new_deadline = market.resolution_deadline;
 
     markets::update_market(e, market);
@@ -50,18 +51,9 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
         return Err(ErrorCode::InvalidOutcome);
     }
 
-    // Issue #24: read the precise per-outcome winner counter maintained by place_bet.
-    // This replaces the unsafe tally/100 heuristic that underestimated winners for
-    // micro-bet markets, risking gas-limit overflows in Push resolution.
-    let actual_winners = markets::count_bets_for_outcome(e, market_id, winning_outcome);
-    let max_push_winners = get_max_push_payout_winners(e);
-
-    // Automatically select payout mode based on exact winner count
-    if actual_winners > max_push_winners {
-        market.payout_mode = PayoutMode::Pull;
-    } else {
-        market.payout_mode = PayoutMode::Push;
-    }
+    // payout_mode is intentionally NOT mutated here — it is fixed at creation
+    // time and must remain stable throughout PendingResolution and Disputed
+    // phases so that gas and distribution path calculations are consistent.
 
     market.status = MarketStatus::Resolved;
     market.winning_outcome = Some(winning_outcome);

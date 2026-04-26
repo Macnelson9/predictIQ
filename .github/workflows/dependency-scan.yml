@@ -1,0 +1,117 @@
+name: Dependency Vulnerability Scanning
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  scan-rust:
+    name: Scan Rust Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit Rust dependencies
+        run: cargo audit --deny warnings
+        continue-on-error: true
+
+      - name: Audit Rust dependencies (fail on critical)
+        run: |
+          output=$(cargo audit --json)
+          critical=$(echo "$output" | jq '[.vulnerabilities[] | select(.advisory.severity == "critical")] | length')
+          if [ "$critical" -gt 0 ]; then
+            echo "❌ Found $critical critical vulnerabilities"
+            echo "$output" | jq '.vulnerabilities[] | select(.advisory.severity == "critical")'
+            exit 1
+          fi
+          echo "✅ No critical vulnerabilities found"
+
+  scan-npm:
+    name: Scan NPM Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Audit NPM dependencies
+        run: npm audit --audit-level=moderate
+        working-directory: frontend
+        continue-on-error: true
+
+      - name: Check for critical vulnerabilities
+        run: |
+          output=$(npm audit --json)
+          critical=$(echo "$output" | jq '.metadata.vulnerabilities.critical // 0')
+          high=$(echo "$output" | jq '.metadata.vulnerabilities.high // 0')
+          if [ "$critical" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "❌ Found $critical critical and $high high vulnerabilities"
+            exit 1
+          fi
+          echo "✅ No critical or high vulnerabilities found"
+        working-directory: frontend
+
+  scan-trivy:
+    name: Scan with Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy'
+
+  report-vulnerabilities:
+    name: Report Vulnerabilities
+    runs-on: ubuntu-latest
+    needs: [scan-rust, scan-npm, scan-trivy]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comment on PR with scan results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const scanStatus = '${{ needs.scan-rust.result }}' === 'failure' || 
+                              '${{ needs.scan-npm.result }}' === 'failure' ||
+                              '${{ needs.scan-trivy.result }}' === 'failure' ? '❌' : '✅';
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `${scanStatus} **Dependency Vulnerability Scan**\n\n- Rust audit: ${{ needs.scan-rust.result }}\n- NPM audit: ${{ needs.scan-npm.result }}\n- Trivy scan: ${{ needs.scan-trivy.result }}`
+            });

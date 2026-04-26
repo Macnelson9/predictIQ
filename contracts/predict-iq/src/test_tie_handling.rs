@@ -10,11 +10,11 @@
 use crate::errors::ErrorCode;
 use crate::modules::markets::DataKey as MarketDataKey;
 use crate::modules::voting::DataKey as VotingDataKey;
-use crate::types::{Market, MarketStatus, OracleConfig};
+use crate::types::{Market, MarketStatus, MarketTier, OracleConfig};
 use crate::{PredictIQ, PredictIQClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env, String, Vec,
+    Address, Env, String, Vec,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -45,14 +45,21 @@ fn create_market(
     let oracle_config = OracleConfig {
         oracle_address: Address::generate(e),
         feed_id: String::from_str(e, "BTC/USD"),
-        min_responses: 1,
+        min_responses: Some(1),
         max_staleness_seconds: 3600,
         max_confidence_bps: 200,
     };
 
     let mut options = soroban_sdk::Vec::new(e);
     for i in 0..num_outcomes {
-        options.push_back(String::from_str(e, &soroban_sdk::format!("Option {}", i)));
+        let label = match i {
+            0 => "Option 0",
+            1 => "Option 1",
+            2 => "Option 2",
+            3 => "Option 3",
+            _ => "Option X",
+        };
+        options.push_back(String::from_str(e, label));
     }
 
     client.create_market(
@@ -62,7 +69,10 @@ fn create_market(
         &1000,
         &2000,
         &oracle_config,
+        &MarketTier::Basic,
         token_address,
+        &0u64,
+        &0u32,
     )
 }
 

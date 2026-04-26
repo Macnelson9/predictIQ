@@ -1,7 +1,7 @@
 use crate::errors::ErrorCode;
 use crate::modules::{markets, sac};
 use crate::types::{Bet, MarketStatus, BET_TTL_LOW_THRESHOLD, BET_TTL_HIGH_THRESHOLD};
-use soroban_sdk::{contracttype, token, Address, Env};
+use soroban_sdk::{contracttype, Address, Env};
 
 /// TTL Strategy for per-user bet records (Issue #100)
 ///
@@ -34,8 +34,9 @@ use soroban_sdk::{contracttype, token, Address, Env};
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    Bet(u64, Address, u32), // market_id, bettor, outcome
-    Claimed(u64, Address),  // market_id, bettor — set after claim
+    Bet(u64, Address, u32),         // market_id, bettor, outcome
+    Claimed(u64, Address),          // market_id, bettor — set after claim
+    BetReferrer(u64, Address, u32), // market_id, bettor, outcome — referrer at bet time
 }
 
 /// Extend the TTL of a bet record to BET_TTL_HIGH_THRESHOLD.
@@ -108,24 +109,37 @@ pub fn place_bet(
         &amount,
     )?;
 
+    // Deduct protocol fee from the bet amount before crediting the pool.
+    // This ensures total_staked always reflects the net distributable pool,
+    // so the parimutuel formula pays out the correct proportional share.
+    let fee = crate::modules::fees::calculate_tiered_fee(e, amount, &market.tier);
+    let net_amount = amount - fee;
+
+    if fee > 0 {
+        crate::modules::fees::collect_fee(e, token_address.clone(), fee);
+    }
+
     let bet_key = DataKey::Bet(market_id, bettor.clone(), outcome);
     let mut existing_bet: Bet = e.storage().persistent().get(&bet_key).unwrap_or(Bet {
         market_id,
         bettor: bettor.clone(),
         outcome,
         amount: 0,
+        fee_paid: 0,
     });
 
-    existing_bet.amount += amount;
+    // Store the net (post-fee) amount so the payout formula is always correct.
+    existing_bet.amount = existing_bet.amount.checked_add(net_amount).ok_or(ErrorCode::ArithmeticOverflow)?;
+    existing_bet.fee_paid += fee;
     existing_bet.outcome = outcome;
-    market.total_staked += amount;
+    market.total_staked = market.total_staked.checked_add(net_amount).ok_or(ErrorCode::ArithmeticOverflow)?;
 
     let outcome_stake = markets::get_outcome_stake(e, market_id, outcome);
-    markets::set_outcome_stake(e, market_id, outcome, outcome_stake + amount);
+    markets::set_outcome_stake(e, market_id, outcome, outcome_stake.checked_add(net_amount).ok_or(ErrorCode::ArithmeticOverflow)?);
     markets::increment_outcome_bet_count(e, market_id, outcome);
 
     // Issue #24: Maintain actual winner count per outcome
-    let is_new_bettor = existing_bet.amount == amount; // first bet on this outcome
+    let is_new_bettor = existing_bet.amount == net_amount; // first bet on this outcome
     if is_new_bettor {
         let current_count = market.winner_counts.get(outcome).unwrap_or(0);
         market.winner_counts.set(outcome, current_count + 1);
@@ -136,12 +150,15 @@ pub fn place_bet(
     markets::update_market(e, market);
     markets::bump_market_ttl(e, market_id);
 
-    // Track referral reward
+    // Track referral reward — 10% of the protocol fee goes to the referrer.
     if let Some(ref r) = referrer {
-        let fee = crate::modules::fees::calculate_fee(e, amount);
         if fee > 0 {
-            crate::modules::fees::add_referral_reward(e, r, fee);
+            crate::modules::fees::add_referral_reward(e, r, &token_address, fee);
         }
+        // Store referrer so cancellation can reverse the reward if needed.
+        let referrer_key = DataKey::BetReferrer(market_id, bettor.clone(), outcome);
+        e.storage().persistent().set(&referrer_key, r);
+        bump_bet_ttl(e, &referrer_key);
     }
 
     // Emit standardized BetPlaced event
@@ -155,6 +172,18 @@ pub fn get_bet(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option
     e.storage()
         .persistent()
         .get(&DataKey::Bet(market_id, bettor, outcome))
+}
+
+/// Returns the referrer stored at bet-placement time, if any.
+pub fn get_bet_referrer(e: &Env, market_id: u64, bettor: Address, outcome: u32) -> Option<Address> {
+    let key = DataKey::BetReferrer(market_id, bettor, outcome);
+    e.storage().persistent().get(&key)
+}
+
+/// Removes the referrer record — called during refund to clean up storage.
+pub fn remove_bet_referrer(e: &Env, market_id: u64, bettor: &Address, outcome: u32) {
+    let key = DataKey::BetReferrer(market_id, bettor.clone(), outcome);
+    e.storage().persistent().remove(&key);
 }
 
 fn internal_claim_amount(
@@ -183,6 +212,13 @@ fn internal_claim_amount(
         bump_bet_ttl(e, key);
     }
     e.storage().persistent().remove(bet_key);
+
+    if !is_refund {
+        if let Some(mut market) = markets::get_market(e, market_id) {
+            market.total_claimed = market.total_claimed.saturating_add(amount);
+            markets::update_market(e, market);
+        }
+    }
 
     crate::modules::events::emit_rewards_claimed(
         e,
@@ -233,7 +269,12 @@ pub fn claim_winnings(e: &Env, bettor: Address, market_id: u64) -> Result<i128, 
     // Integer division truncates down, favouring the protocol.
     let winning_outcome_stake = markets::get_outcome_stake(e, market_id, winning_outcome);
     let winning_outcome_stake = if winning_outcome_stake > 0 { winning_outcome_stake } else { bet.amount };
-    let winnings = (bet.amount * market.total_staked) / winning_outcome_stake;
+    
+    // Issue #192: Use checked arithmetic to prevent overflow in high-inflation scenarios
+    let winnings = bet.amount
+        .checked_mul(market.total_staked)
+        .and_then(|product| product.checked_div(winning_outcome_stake))
+        .ok_or(ErrorCode::ArithmeticOverflow)?;
 
     internal_claim_amount(
         e,
@@ -255,6 +296,12 @@ pub fn withdraw_refund(
     token_address: Address,
 ) -> Result<i128, ErrorCode> {
     bettor.require_auth();
+
+    // Issue #93: Refunds are outbound token movements and must respect the
+    // circuit breaker just like place_bet. A paused contract must not allow
+    // any token egress — including refunds — to prevent exploitation during
+    // an active incident.
+    crate::modules::circuit_breaker::require_not_paused_for_high_risk(e)?;
 
     let mut market = markets::get_market(e, market_id).ok_or(ErrorCode::MarketNotFound)?;
 

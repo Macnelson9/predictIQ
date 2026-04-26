@@ -10,6 +10,9 @@ pub struct Metrics {
     cache_misses: IntCounterVec,
     invalidations: IntCounterVec,
     request_latency: HistogramVec,
+    rpc_errors: IntCounterVec,
+    rpc_fallbacks: IntCounterVec,
+    db_timeouts: IntCounterVec,
 }
 
 impl Metrics {
@@ -37,16 +40,43 @@ impl Metrics {
         let request_latency = HistogramVec::new(
             prometheus::HistogramOpts::new(
                 "http_request_duration_seconds",
-                "HTTP latency in seconds",
+                "HTTP request latency in seconds",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+            &["route", "status_code"],
+        )
+        .context("request_latency metric")?;
+
+        let rpc_errors = IntCounterVec::new(
+            prometheus::Opts::new("rpc_errors_total", "RPC errors by method"),
+            &["method"],
+        )
+        .context("rpc_errors metric")?;
+
+        let rpc_fallbacks = IntCounterVec::new(
+            prometheus::Opts::new(
+                "rpc_fallbacks_total",
+                "RPC calls that fell back to zero/default payload, by endpoint",
             ),
             &["endpoint"],
         )
-        .context("request_latency metric")?;
+        .context("rpc_fallbacks metric")?;
+
+        let db_timeouts = IntCounterVec::new(
+            prometheus::Opts::new("db_timeouts_total", "DB queries that exceeded the timeout, by operation"),
+            &["operation"],
+        )
+        .context("db_timeouts metric")?;
 
         registry.register(Box::new(cache_hits.clone()))?;
         registry.register(Box::new(cache_misses.clone()))?;
         registry.register(Box::new(invalidations.clone()))?;
         registry.register(Box::new(request_latency.clone()))?;
+        registry.register(Box::new(rpc_errors.clone()))?;
+        registry.register(Box::new(rpc_fallbacks.clone()))?;
+        registry.register(Box::new(db_timeouts.clone()))?;
 
         Ok(Self {
             registry,
@@ -54,6 +84,9 @@ impl Metrics {
             cache_misses,
             invalidations,
             request_latency,
+            rpc_errors,
+            rpc_fallbacks,
+            db_timeouts,
         })
     }
 
@@ -75,10 +108,30 @@ impl Metrics {
         }
     }
 
-    pub fn observe_request(&self, endpoint: &str, duration: Duration) {
+    pub fn observe_request(&self, route: &str, status_code: &str, duration: Duration) {
         self.request_latency
-            .with_label_values(&[endpoint])
+            .with_label_values(&[route, status_code])
             .observe(duration.as_secs_f64());
+    }
+
+    pub fn observe_rpc_error(&self, method: &str) {
+        self.rpc_errors.with_label_values(&[method]).inc();
+    }
+
+    pub fn observe_rpc_fallback(&self, endpoint: &str) {
+        self.rpc_fallbacks.with_label_values(&[endpoint]).inc();
+    }
+
+    pub fn observe_db_timeout(&self, operation: &str) {
+        self.db_timeouts.with_label_values(&[operation]).inc();
+    }
+
+    pub fn observe_tx_eviction(&self, count: u64) {
+        if count > 0 {
+            self.invalidations
+                .with_label_values(&["tx_watch_eviction"])
+                .inc_by(count);
+        }
     }
 
     pub fn render(&self) -> anyhow::Result<String> {

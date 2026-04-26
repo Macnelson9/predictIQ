@@ -1,6 +1,6 @@
 use crate::errors::ErrorCode;
 use crate::types::{
-    ConfigKey, Guardian, PendingUpgrade, GOV_TTL_HIGH_THRESHOLD, GOV_TTL_LOW_THRESHOLD,
+    ConfigKey, Guardian, PendingUpgrade, TTL_HIGH_THRESHOLD, TTL_LOW_THRESHOLD,
     MAJORITY_THRESHOLD_PERCENT, TIMELOCK_DURATION, TIMELOCK_MIN_SECONDS, TIMELOCK_MAX_SECONDS,
     UPGRADE_COOLDOWN_DURATION,
 };
@@ -11,7 +11,7 @@ use soroban_sdk::{Address, BytesN, Env, Vec};
 fn bump_gov_ttl(e: &Env, key: &ConfigKey) {
     e.storage()
         .persistent()
-        .extend_ttl(key, GOV_TTL_LOW_THRESHOLD, GOV_TTL_HIGH_THRESHOLD);
+        .extend_ttl(key, TTL_LOW_THRESHOLD, TTL_HIGH_THRESHOLD);
 }
 
 /// Initialize the GuardianSet with a list of guardians and their voting power.
@@ -98,7 +98,7 @@ pub fn remove_guardian(e: &Env, address: Address) -> Result<(), ErrorCode> {
 
     // Initiate removal proposal
     let pending_removal = crate::types::PendingGuardianRemoval {
-        target_guardian: address.clone(),
+        address: address.clone(),
         initiated_at: e.ledger().timestamp(),
         votes_for: Vec::new(e),
     };
@@ -151,7 +151,7 @@ pub fn vote_on_guardian_removal(e: &Env, voter: Address, approve: bool) -> Resul
         // Majority reached, execute removal
         let mut new_guardians: Vec<Guardian> = Vec::new(e);
         for g in guardians.iter() {
-            if g.address != pending_removal.target_guardian {
+            if g.address != pending_removal.address {
                 new_guardians.push_back(g.clone());
             }
         }
@@ -202,6 +202,10 @@ pub fn initiate_upgrade(e: &Env, wasm_hash: BytesN<32>) -> Result<(), ErrorCode>
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
     bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
+
+    let admin = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
+    crate::modules::events::emit_upgrade_initiated(e, admin, wasm_hash);
+
     Ok(())
 }
 
@@ -292,6 +296,9 @@ pub fn vote_for_upgrade(e: &Env, voter: Address, vote_for: bool) -> Result<bool,
         .persistent()
         .set(&ConfigKey::PendingUpgrade, &pending_upgrade);
     bump_gov_ttl(e, &ConfigKey::PendingUpgrade);
+
+    crate::modules::events::emit_upgrade_voted(e, voter, vote_for);
+
     Ok(true)
 }
 
@@ -362,7 +369,7 @@ fn is_majority_met(e: &Env, pending_upgrade: &PendingUpgrade) -> bool {
 
 /// Execute the upgrade if timelock is satisfied and majority voted in favor.
 /// This directly invokes the Soroban host upgrade function.
-pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
+pub fn execute_upgrade(e: &Env) -> Result<BytesN<32>, ErrorCode> {
     // Verify timelock has passed
     if !is_timelock_satisfied(e)? {
         return Err(ErrorCode::TimelockActive);
@@ -372,9 +379,9 @@ pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
 
     // Verify majority vote
     if !is_majority_met(e, &pending_upgrade) {
-        // A failed execution after the timelock is treated as a governance rejection.
         set_upgrade_rejected_at(e, &pending_upgrade.wasm_hash);
         e.storage().persistent().remove(&ConfigKey::PendingUpgrade);
+        crate::modules::events::emit_upgrade_rejected(e, pending_upgrade.wasm_hash);
         return Err(ErrorCode::InsufficientVotes);
     }
 
@@ -384,16 +391,19 @@ pub fn execute_upgrade(e: &Env) -> Result<(), ErrorCode> {
     e.storage().persistent().remove(&ConfigKey::PendingUpgrade);
     clear_upgrade_rejected_at(e, &wasm_hash);
 
-    // Execute host-level contract code upgrade.
-    e.deployer().update_current_contract_wasm(wasm_hash);
+    let executor = crate::modules::admin::get_admin(e).unwrap_or(e.current_contract_address());
+    crate::modules::events::emit_upgrade_executed(e, executor, wasm_hash.clone());
 
-    Ok(())
+    // Execute host-level contract code upgrade.
+    e.deployer().update_current_contract_wasm(wasm_hash.clone());
+
+    Ok(wasm_hash)
 }
 
 /// Get vote statistics for the pending upgrade.
-pub fn get_upgrade_votes(e: &Env) -> Result<crate::types::UpgradeStats, ErrorCode> {
+pub fn get_upgrade_votes(e: &Env) -> Result<crate::types::UpgradeVoteStats, ErrorCode> {
     let pending_upgrade = get_pending_upgrade(e).ok_or(ErrorCode::UpgradeNotInitiated)?;
-    Ok(crate::types::UpgradeStats {
+    Ok(crate::types::UpgradeVoteStats {
         votes_for: pending_upgrade.votes_for.len() as u32,
         votes_against: pending_upgrade.votes_against.len() as u32,
     })

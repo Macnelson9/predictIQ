@@ -1,54 +1,57 @@
 # Database Schema Documentation
 
-This service uses PostgreSQL. The schema and seed scripts for backend issue #13 are in:
+This service uses PostgreSQL. Schema and seed scripts are in:
 
-- `services/api/database/migrations`
-- `services/api/database/seeds`
+- `services/api/database/migrations/`
+- `services/api/database/seeds/`
 
 ## Tables
 
-- `newsletter_subscriptions`
+- `newsletter_subscribers` — email opt-in list with double-opt-in confirmation
 - `contact_form_submissions`
 - `waitlist_entries`
 - `analytics_events`
 - `content_management`
 - `audit_logs`
+- `email_jobs` — async email queue tracking
 
 ## Migration Files
 
 1. `001_enable_pgcrypto.sql`
-2. `002_create_newsletter_subscriptions.sql`
+2. `002_create_newsletter_subscriptions.sql` — creates `newsletter_subscribers` table
 3. `003_create_contact_form_submissions.sql`
 4. `004_create_waitlist_entries.sql`
 5. `005_create_content_management.sql`
 6. `006_create_analytics_events.sql`
 7. `007_create_audit_logs.sql`
+8. `008_create_email_tracking.sql`
 
 ## Apply Migrations
 
-```bash
-cd /home/gene/Desktop/drips/predictIQ
+Run from the workspace root:
 
-# Example: apply all migrations in order
+```bash
 for f in services/api/database/migrations/*.sql; do
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
 done
 ```
 
+Or use the provided script:
+
+```bash
+bash services/api/scripts/run_migrations.sh
+```
+
 ## Rollback
 
-This repository currently uses forward SQL migrations only.
+This repository uses forward-only SQL migrations. For rollback:
 
-For rollback, run explicit reverse scripts in a controlled window (recommended approach):
-
-- Create `down` scripts for each migration before production rollout.
-- Restore from backup/snapshot if a hot rollback is required.
+- Write explicit reverse scripts before production rollout.
+- Restore from backup/snapshot for emergency rollback.
 
 ## Seeding
 
 ```bash
-cd /home/gene/Desktop/drips/predictIQ
-
 for f in services/api/database/seeds/*.sql; do
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
 done
@@ -56,23 +59,21 @@ done
 
 ## Backup Strategy
 
-- Daily logical backups with `pg_dump` and 30-day retention.
-- Weekly full snapshot backup and 90-day retention.
-- Quarterly restore drills in staging to verify backup integrity.
-- Encrypt backup storage at rest and enforce access controls.
+- Daily logical backups with `pg_dump`, 30-day retention.
+- Weekly full snapshot, 90-day retention.
+- Quarterly restore drills in staging.
+- Encrypt backup storage at rest.
 
 ## Data Retention Policy
 
-- `analytics_events`: retain raw events for 13 months, then archive/aggregate.
-- `audit_logs`: retain for at least 24 months for compliance and investigations.
-- `contact_form_submissions`: retain 12 months unless legal hold is applied.
-- `newsletter_subscriptions` and `waitlist_entries`: retain active records; hard-delete per GDPR request.
-- Soft-deleted content/audit records (`deleted_at`) should be purged per compliance schedule.
+- `analytics_events`: 13 months raw, then archive/aggregate.
+- `audit_logs`: 24 months minimum for compliance.
+- `contact_form_submissions`: 12 months unless legal hold.
+- `newsletter_subscribers` / `waitlist_entries`: retain active records; hard-delete on GDPR request.
 
-## Notes on Integrity and Performance
+## Notes
 
-- UUID primary keys are generated with `gen_random_uuid()`.
-- All core tables include `created_at` and `updated_at` timestamps.
-- Soft deletes are implemented with `deleted_at` in `content_management` and `audit_logs`.
-- Foreign keys are defined in `analytics_events` and `audit_logs` where relationships are concrete.
-- Indexes are included for high-frequency query fields (`email`, `status`, `created_at`, event dimensions).
+- UUID primary keys via `gen_random_uuid()`.
+- All tables include `created_at` / `updated_at` timestamps.
+- Soft deletes via `deleted_at` in `content_management` and `audit_logs`.
+- Indexes on high-frequency query fields (`email`, `status`, `created_at`).

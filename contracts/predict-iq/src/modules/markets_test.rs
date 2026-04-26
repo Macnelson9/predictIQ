@@ -34,7 +34,6 @@ fn test_create_market_basic() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -71,7 +70,6 @@ fn test_create_market_with_single_option_fails() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -107,7 +105,6 @@ fn test_create_market_with_too_many_outcomes() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -145,7 +142,6 @@ fn test_create_market_deadline_in_past() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -181,7 +177,6 @@ fn test_create_market_resolution_before_deadline() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -217,7 +212,6 @@ fn test_market_id_increments() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -315,7 +309,6 @@ fn test_market_tiers() {
         feed_id: String::from_str(&env, "test"),
         min_responses: Some(1),
         max_staleness_seconds: 3600,
-        max_confidence_bps: 200,
         max_confidence_bps: 100,
     };
 
@@ -644,6 +637,136 @@ fn test_permissionless_prune_by_non_admin() {
     env.ledger().set_timestamp(1000 + 2_678_401);
 
     // A random non-admin user triggers pruning
+    let result = client.try_prune_market(&market_id);
+    assert!(result.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Prune status-matrix tests
+//
+// Acceptance requirement: prune_market must be rejected for every non-Resolved
+// status variant.  Each test drives the market into the target state via the
+// normal lifecycle API, then asserts the correct error is returned.
+// ---------------------------------------------------------------------------
+
+fn make_oracle_config(env: &Env) -> OracleConfig {
+    OracleConfig {
+        oracle_address: Address::generate(env),
+        feed_id: String::from_str(env, "test"),
+        min_responses: Some(1),
+        max_staleness_seconds: 3600,
+        max_confidence_bps: 100,
+    }
+}
+
+fn create_market_at(
+    env: &Env,
+    client: &PredictIQClient,
+    creator: &Address,
+    deadline: u64,
+    resolution_deadline: u64,
+) -> u64 {
+    let options = Vec::from_array(
+        env,
+        [String::from_str(env, "Yes"), String::from_str(env, "No")],
+    );
+    let token = Address::generate(env);
+    client.create_market(
+        creator,
+        &String::from_str(env, "M"),
+        &options,
+        &deadline,
+        &resolution_deadline,
+        &make_oracle_config(env),
+        &MarketTier::Basic,
+        &token,
+        &0,
+        &0,
+    )
+}
+
+/// Active market → prune must return MarketNotResolved.
+#[test]
+fn test_prune_rejects_active_market() {
+    let (env, client, admin) = setup();
+    env.ledger().set_timestamp(100);
+    let market_id = create_market_at(&env, &client, &admin, 2000, 3000);
+
+    let result = client.try_prune_market(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::MarketNotResolved)));
+}
+
+/// PendingResolution market → prune must return MarketNotResolved.
+#[test]
+fn test_prune_rejects_pending_resolution_market() {
+    let (env, client, admin) = setup();
+    env.ledger().set_timestamp(100);
+    let market_id = create_market_at(&env, &client, &admin, 2000, 3000);
+
+    // Drive to PendingResolution via oracle result + attempt_oracle_resolution.
+    client.set_oracle_result(&market_id, &0, &0);
+    env.ledger().set_timestamp(3000); // at resolution deadline
+    client.attempt_oracle_resolution(&market_id);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, MarketStatus::PendingResolution);
+
+    let result = client.try_prune_market(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::MarketNotResolved)));
+}
+
+/// Disputed market → prune must return MarketNotResolved.
+#[test]
+fn test_prune_rejects_disputed_market() {
+    let (env, client, admin) = setup();
+    env.ledger().set_timestamp(100);
+    let market_id = create_market_at(&env, &client, &admin, 2000, 3000);
+
+    // Drive to PendingResolution then file a dispute.
+    client.set_oracle_result(&market_id, &0, &0);
+    env.ledger().set_timestamp(3000);
+    client.attempt_oracle_resolution(&market_id);
+
+    let disputer = Address::generate(&env);
+    env.ledger().set_timestamp(3000 + 1000); // within 72h dispute window
+    client.file_dispute(&disputer, &market_id);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, MarketStatus::Disputed);
+
+    let result = client.try_prune_market(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::MarketNotResolved)));
+}
+
+/// Cancelled market → prune must return MarketNotResolved.
+#[test]
+fn test_prune_rejects_cancelled_market() {
+    let (env, client, admin) = setup();
+    env.ledger().set_timestamp(100);
+    let market_id = create_market_at(&env, &client, &admin, 2000, 3000);
+
+    client.cancel_market_admin(&market_id);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, MarketStatus::Cancelled);
+
+    let result = client.try_prune_market(&market_id);
+    assert_eq!(result, Err(Ok(ErrorCode::MarketNotResolved)));
+}
+
+/// Resolved market past grace period → prune must succeed (positive control).
+#[test]
+fn test_prune_accepts_resolved_market_past_grace_period() {
+    let (env, client, admin) = setup();
+    env.ledger().set_timestamp(100);
+    let market_id = create_market_at(&env, &client, &admin, 2000, 3000);
+
+    client.resolve_market(&market_id, &0);
+
+    let market = client.get_market(&market_id).unwrap();
+    assert_eq!(market.status, MarketStatus::Resolved);
+
+    env.ledger().set_timestamp(100 + 2_592_001); // past 30-day grace period
     let result = client.try_prune_market(&market_id);
     assert!(result.is_ok());
 }

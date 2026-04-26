@@ -1,0 +1,201 @@
+# PredictIQ Alert Configuration
+# This file defines alerting rules for critical system metrics
+
+groups:
+  - name: api_performance
+    interval: 30s
+    rules:
+      - alert: HighAPIResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API response time detected"
+          description: "API p95 response time is {{ $value }}s, exceeding 200ms threshold"
+
+      - alert: CriticalAPIResponseTime
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Critical API response time detected"
+          description: "API p99 response time is {{ $value }}s, exceeding 500ms critical threshold"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.001
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }}, exceeding 0.1% threshold"
+
+      - alert: LowThroughput
+        expr: rate(http_requests_total[5m]) < 1000
+        for: 10m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Low request throughput"
+          description: "Request throughput is {{ $value }} req/s, below 1000 req/s minimum"
+
+  - name: cache_performance
+    interval: 30s
+    rules:
+      - alert: LowCacheHitRate
+        expr: rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m])) < 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Low cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}, below 80% threshold"
+
+  - name: database_performance
+    interval: 30s
+    rules:
+      - alert: SlowDatabaseQueries
+        expr: histogram_quantile(0.95, rate(db_query_duration_seconds_bucket[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Slow database queries detected"
+          description: "Database p95 query time is {{ $value }}s, exceeding 50ms threshold"
+
+      - alert: CriticalDatabaseQueries
+        expr: histogram_quantile(0.99, rate(db_query_duration_seconds_bucket[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Critical database query performance"
+          description: "Database p99 query time is {{ $value }}s, exceeding 100ms critical threshold"
+
+      - alert: HighDBConnectionPoolUtilization
+        expr: db_connections_active / db_connections_max > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "High database connection pool utilization"
+          description: "Connection pool utilization is {{ $value | humanizePercentage }}, exceeding 80% threshold"
+
+      - alert: CriticalDBConnectionPoolUtilization
+        expr: db_connections_active / db_connections_max > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Critical database connection pool utilization"
+          description: "Connection pool utilization is {{ $value | humanizePercentage }}, exceeding 95% critical threshold"
+
+  - name: contract_performance
+    interval: 1m
+    rules:
+      - alert: HighContractGasCosts
+        expr: contract_gas_used{operation="create_market"} > 500000
+        for: 5m
+        labels:
+          severity: warning
+          component: contracts
+        annotations:
+          summary: "High gas costs for market creation"
+          description: "Create market gas cost is {{ $value }}, exceeding 500000 threshold"
+
+      - alert: HighBetGasCosts
+        expr: contract_gas_used{operation="place_bet"} > 200000
+        for: 5m
+        labels:
+          severity: warning
+          component: contracts
+        annotations:
+          summary: "High gas costs for placing bets"
+          description: "Place bet gas cost is {{ $value }}, exceeding 200000 threshold"
+
+      - alert: HighResolutionGasCosts
+        expr: contract_gas_used{operation="resolve_market"} > 300000
+        for: 5m
+        labels:
+          severity: warning
+          component: contracts
+        annotations:
+          summary: "High gas costs for market resolution"
+          description: "Resolve market gas cost is {{ $value }}, exceeding 300000 threshold"
+
+  - name: system_health
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"predictiq-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Service is down"
+          description: "{{ $labels.job }} has been down for more than 1 minute"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}, exceeding 90% threshold"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}%, exceeding 80% threshold"
+
+  - name: performance_regression
+    interval: 1h
+    rules:
+      - alert: PerformanceDegradation
+        expr: |
+          (
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1h]))
+            /
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1h] offset 24h))
+          ) > 1.1
+        for: 30m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "Performance degradation detected"
+          description: "Response time has degraded by more than 10% compared to 24h ago"
+
+      - alert: SignificantPerformanceDegradation
+        expr: |
+          (
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1h]))
+            /
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1h] offset 24h))
+          ) > 1.05
+        for: 1h
+        labels:
+          severity: info
+          component: performance
+        annotations:
+          summary: "Performance degradation alert threshold reached"
+          description: "Response time has degraded by more than 5% compared to 24h ago (alert threshold)"
