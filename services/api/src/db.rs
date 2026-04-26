@@ -607,6 +607,18 @@ impl Database {
         Ok(())
     }
 
+    /// Ping the database with a bounded timeout. Returns Ok(()) if reachable.
+    pub async fn ping(&self) -> anyhow::Result<()> {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(&self.pool),
+        )
+        .await
+        .context("db ping timed out")?
+        .context("db ping failed")?;
+        Ok(())
+    }
+
     /// Check whether an email event already exists (replay-attack guard).
     pub async fn email_event_exists(
         &self,
