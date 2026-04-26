@@ -4,7 +4,7 @@
   "description": "PredictIQ Landing Page with WCAG 2.1 AA Compliance",
   "private": true,
   "scripts": {
-    "generate-client": "openapi-typescript ../../services/api/openapi.yaml -o src/lib/api/schema.d.ts",
+    "generate-client": "openapi-typescript ../services/api/openapi.yaml -o src/lib/api/schema.d.ts",
     "dev": "next dev",
     "build": "npm run generate-client && next build",
     "start": "next start",

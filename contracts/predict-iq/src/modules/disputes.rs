@@ -1,8 +1,9 @@
 use crate::errors::ErrorCode;
-use crate::modules::markets;
-use crate::types::MarketStatus;
-use soroban_sdk::{Address, Env};
+use crate::modules::{markets, resolution};
+use crate::types::{ConfigKey, MarketStatus};
+use soroban_sdk::{contracttype, Address, Env};
 
+#[contracttype]
 #[derive(Clone)]
 pub struct ResolutionMetrics {
     pub winner_count: u32,
@@ -22,15 +23,15 @@ pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) -> Result<
     let pending_ts = market
         .pending_resolution_timestamp
         .ok_or(ErrorCode::ResolutionNotReady)?;
-    if e.ledger().timestamp() >= pending_ts + 172_800 {
-        // 48h window (Issue #8)
+    if e.ledger().timestamp() >= pending_ts + resolution::get_dispute_window() {
+        // Issue #8: window is now configurable (default 72h)
         return Err(ErrorCode::DisputeWindowClosed);
     }
 
     market.status = MarketStatus::Disputed;
-    market.resolution_deadline += 86400 * 3;
-    // Issue: record dispute timestamp for resolution.rs
     market.dispute_timestamp = Some(e.ledger().timestamp());
+    // Extend resolution deadline by the full dispute window duration
+    market.resolution_deadline += resolution::get_dispute_window();
     let new_deadline = market.resolution_deadline;
 
     markets::update_market(e, market);
@@ -40,7 +41,7 @@ pub fn file_dispute(e: &Env, disciplinarian: Address, market_id: u64) -> Result<
     Ok(())
 }
 
-/// Issue #23: payout_mode is immutable after creation — do not switch it here.
+/// Issue #23: payout_mode is immutable after creation — never mutated here.
 /// Issue #24: Use actual winner_counts instead of heuristic.
 /// Issue #35: Calculate and emit actual total payout.
 pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(), ErrorCode> {
@@ -49,6 +50,10 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
     if winning_outcome >= market.options.len() {
         return Err(ErrorCode::InvalidOutcome);
     }
+
+    // payout_mode is intentionally NOT mutated here — it is fixed at creation
+    // time and must remain stable throughout PendingResolution and Disputed
+    // phases so that gas and distribution path calculations are consistent.
 
     market.status = MarketStatus::Resolved;
     market.winning_outcome = Some(winning_outcome);
@@ -76,7 +81,27 @@ pub fn resolve_market(e: &Env, market_id: u64, winning_outcome: u32) -> Result<(
     Ok(())
 }
 
-/// Issue #24: Use actual winner_counts maintained during place_bet.
+pub fn set_max_push_payout_winners(e: &Env, threshold: u32) -> Result<(), ErrorCode> {
+    crate::modules::admin::require_admin(e)?;
+    e.storage()
+        .persistent()
+        .set(&ConfigKey::MaxPushPayoutWinners, &threshold);
+    e.storage().persistent().extend_ttl(
+        &ConfigKey::MaxPushPayoutWinners,
+        crate::types::GOV_TTL_LOW_THRESHOLD,
+        crate::types::GOV_TTL_HIGH_THRESHOLD,
+    );
+    Ok(())
+}
+
+pub fn get_max_push_payout_winners(e: &Env) -> u32 {
+    e.storage()
+        .persistent()
+        .get(&ConfigKey::MaxPushPayoutWinners)
+        .unwrap_or(crate::types::MAX_PUSH_PAYOUT_WINNERS)
+}
+
+// Batch resolution metrics for monitoring
 pub fn get_resolution_metrics(e: &Env, market_id: u64, outcome: u32) -> ResolutionMetrics {
     let winner_count = markets::count_bets_for_outcome(e, market_id, outcome);
     let total_stake = match markets::get_market(e, market_id) {

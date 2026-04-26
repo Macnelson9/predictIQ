@@ -1,13 +1,18 @@
 import React from 'react';
+import { useI18n } from '../lib/hooks/useI18n';
+import { useDarkMode } from '../lib/hooks/useDarkMode';
 
 interface LandingPageProps {
   className?: string;
 }
 
 export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
+  const { t, locale, setLocale, availableLocales } = useI18n();
+  const { isDarkMode, toggleDarkMode } = useDarkMode();
   const [email, setEmail] = React.useState('');
   const [emailError, setEmailError] = React.useState('');
   const [isSubmitted, setIsSubmitted] = React.useState(false);
+  const formStatusRef = React.useRef<HTMLDivElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -15,11 +20,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
     // Basic email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!email) {
-      setEmailError('Email is required');
+      setEmailError(t('hero.emailRequired'));
       return;
     }
     if (!emailRegex.test(email)) {
-      setEmailError('Please enter a valid email address');
+      setEmailError(t('hero.emailInvalid'));
       return;
     }
     
@@ -27,9 +32,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
     setIsSubmitted(true);
     
     // Announce success to screen readers
-    const announcement = document.getElementById('form-status');
-    if (announcement) {
-      announcement.textContent = 'Successfully subscribed to updates!';
+    if (formStatusRef.current) {
+      formStatusRef.current.textContent = 'Successfully subscribed to updates!';
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Allow form submission with Enter key
+    if (e.key === 'Enter' && e.currentTarget.tagName === 'FORM') {
+      handleSubmit(e as unknown as React.FormEvent);
     }
   };
 
@@ -52,12 +63,44 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
                 height="50"
               />
             </div>
-            <ul className="nav-menu">
-              <li><a href="#features">Features</a></li>
-              <li><a href="#how-it-works">How It Works</a></li>
-              <li><a href="#about">About</a></li>
-              <li><a href="#contact">Contact</a></li>
+            <ul className="nav-menu" role="menubar">
+              <li role="none"><a href="#features" role="menuitem">Features</a></li>
+              <li role="none"><a href="#how-it-works" role="menuitem">How It Works</a></li>
+              <li role="none"><a href="#about" role="menuitem">About</a></li>
+              <li role="none"><a href="#contact" role="menuitem">Contact</a></li>
             </ul>
+            
+            {/* Controls */}
+            <div className="header-controls">
+              {/* Dark Mode Toggle */}
+              <button
+                onClick={toggleDarkMode}
+                aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                className="dark-mode-toggle"
+                title={isDarkMode ? 'Light mode' : 'Dark mode'}
+              >
+                {isDarkMode ? '☀️' : '🌙'}
+              </button>
+
+              {/* Language Selector */}
+              <div className="language-selector">
+                <label htmlFor="locale-select" className="visually-hidden">
+                  Select language
+                </label>
+                <select
+                  id="locale-select"
+                  value={locale}
+                  onChange={(e) => setLocale(e.target.value as any)}
+                  aria-label="Language selection"
+                >
+                  {availableLocales.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {loc.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
         </nav>
       </header>
@@ -67,26 +110,26 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
         {/* Hero Section */}
         <section aria-labelledby="hero-heading" className="hero">
           <h1 id="hero-heading">
-            Decentralized Prediction Markets on Stellar
+            {t('hero.title')}
           </h1>
           <p className="hero-description">
-            Create, bet on, and resolve prediction markets with transparency, 
-            security, and fairness powered by blockchain technology.
+            {t('hero.description')}
           </p>
           
           {/* CTA Form */}
           <form 
-            onSubmit={handleSubmit} 
+            onSubmit={handleSubmit}
+            onKeyDown={handleKeyDown}
             aria-labelledby="signup-heading"
             noValidate
           >
             <h2 id="signup-heading" className="visually-hidden">
-              Sign up for updates
+              {t('hero.signupHeading')}
             </h2>
             
             <div className="form-group">
               <label htmlFor="email-input">
-                Email Address
+                {t('hero.emailLabel')}
                 <span aria-label="required" className="required">*</span>
               </label>
               <input
@@ -100,7 +143,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
                 aria-required="true"
                 aria-invalid={!!emailError}
                 aria-describedby={emailError ? 'email-error' : undefined}
-                placeholder="you@example.com"
+                placeholder={t('hero.emailPlaceholder')}
                 disabled={isSubmitted}
               />
               {emailError && (
@@ -113,13 +156,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
             <button 
               type="submit" 
               disabled={isSubmitted}
-              aria-label={isSubmitted ? 'Already subscribed' : 'Subscribe to updates'}
+              aria-label={isSubmitted ? t('hero.subscribedButton') : t('hero.submitButton')}
             >
-              {isSubmitted ? 'Subscribed!' : 'Get Early Access'}
+              {isSubmitted ? t('hero.subscribedButton') : t('hero.submitButton')}
             </button>
 
             {/* Screen reader announcement */}
             <div 
+              ref={formStatusRef}
               id="form-status" 
               role="status" 
               aria-live="polite" 
@@ -131,7 +175,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
 
         {/* Features Section */}
         <section aria-labelledby="features-heading" id="features">
-          <h2 id="features-heading">Key Features</h2>
+          <h2 id="features-heading">{t('features.heading')}</h2>
           
           <div className="features-grid">
             <article className="feature-card">
@@ -142,10 +186,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
                 width="64"
                 height="64"
               />
-              <h3>Fully Decentralized</h3>
+              <h3>{t('features.decentralized.title')}</h3>
               <p>
-                No central authority. Markets run on smart contracts with 
-                transparent, immutable rules.
+                {t('features.decentralized.description')}
               </p>
             </article>
 
@@ -157,10 +200,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
                 width="64"
                 height="64"
               />
-              <h3>Secure & Audited</h3>
+              <h3>{t('features.secure.title')}</h3>
               <p>
-                Smart contracts audited by leading security firms. Your funds 
-                are protected by battle-tested code.
+                {t('features.secure.description')}
               </p>
             </article>
 
@@ -172,10 +214,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
                 width="64"
                 height="64"
               />
-              <h3>Lightning Fast</h3>
+              <h3>{t('features.fast.title')}</h3>
               <p>
-                Built on Stellar for near-instant transactions and minimal fees. 
-                Trade without waiting.
+                {t('features.fast.description')}
               </p>
             </article>
           </div>
@@ -183,39 +224,36 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
 
         {/* How It Works Section */}
         <section aria-labelledby="how-it-works-heading" id="how-it-works">
-          <h2 id="how-it-works-heading">How It Works</h2>
+          <h2 id="how-it-works-heading">{t('howItWorks.heading')}</h2>
           
           <ol className="steps-list">
             <li>
-              <h3>Create a Market</h3>
-              <p>Define outcomes and set parameters for your prediction market.</p>
+              <h3>{t('howItWorks.step1.title')}</h3>
+              <p>{t('howItWorks.step1.description')}</p>
             </li>
             <li>
-              <h3>Place Bets</h3>
-              <p>Users bet on outcomes they believe will occur.</p>
+              <h3>{t('howItWorks.step2.title')}</h3>
+              <p>{t('howItWorks.step2.description')}</p>
             </li>
             <li>
-              <h3>Oracle Resolution</h3>
-              <p>Trusted oracles provide real-world data to resolve markets.</p>
+              <h3>{t('howItWorks.step3.title')}</h3>
+              <p>{t('howItWorks.step3.description')}</p>
             </li>
             <li>
-              <h3>Claim Winnings</h3>
-              <p>Winners automatically receive their share of the pool.</p>
+              <h3>{t('howItWorks.step4.title')}</h3>
+              <p>{t('howItWorks.step4.description')}</p>
             </li>
           </ol>
         </section>
 
         {/* About Section */}
         <section aria-labelledby="about-heading" id="about">
-          <h2 id="about-heading">About PredictIQ</h2>
+          <h2 id="about-heading">{t('about.heading')}</h2>
           <p>
-            PredictIQ is a decentralized prediction market platform built on 
-            the Stellar blockchain. We enable anyone to create, participate in, 
-            and resolve prediction markets with complete transparency and fairness.
+            {t('about.description1')}
           </p>
           <p>
-            Our smart contracts are open-source, audited, and designed with 
-            security and user experience as top priorities.
+            {t('about.description2')}
           </p>
         </section>
       </main>
@@ -224,30 +262,30 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
       <footer role="contentinfo" id="contact">
         <div className="footer-content">
           <div className="footer-section">
-            <h2>PredictIQ</h2>
-            <p>Decentralized prediction markets for everyone.</p>
+            <h2>{t('footer.title')}</h2>
+            <p>{t('footer.tagline')}</p>
           </div>
           
           <div className="footer-section">
-            <h3>Links</h3>
+            <h3>{t('footer.linksHeading')}</h3>
             <ul>
-              <li><a href="/docs">Documentation</a></li>
-              <li><a href="/github">GitHub</a></li>
-              <li><a href="/discord">Discord</a></li>
+              <li><a href="/docs">{t('footer.documentation')}</a></li>
+              <li><a href="/github">{t('footer.github')}</a></li>
+              <li><a href="/discord">{t('footer.discord')}</a></li>
             </ul>
           </div>
           
           <div className="footer-section">
-            <h3>Legal</h3>
+            <h3>{t('footer.legalHeading')}</h3>
             <ul>
-              <li><a href="/privacy">Privacy Policy</a></li>
-              <li><a href="/terms">Terms of Service</a></li>
+              <li><a href="/privacy">{t('footer.privacy')}</a></li>
+              <li><a href="/terms">{t('footer.terms')}</a></li>
             </ul>
           </div>
         </div>
         
         <div className="footer-bottom">
-          <p>&copy; 2024 PredictIQ. All rights reserved.</p>
+          <p>{t('footer.copyright')}</p>
         </div>
       </footer>
     </div>

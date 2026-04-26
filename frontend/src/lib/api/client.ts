@@ -3,15 +3,62 @@
  * Run `npm run generate-client` to regenerate `schema.d.ts` after API changes.
  */
 
-const BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "http://localhost:3001";
+import { getEnvConfig } from './env';
+import { apiCache, CACHE_TTL } from './cache';
+
+const config = getEnvConfig();
+const BASE_URL = config.apiUrl.replace(/\/$/, "");
 
 type HttpMethod = "GET" | "POST" | "DELETE";
+
+interface RequestOptions {
+  body?: unknown;
+  params?: Record<string, string | number | undefined>;
+  cacheTtl?: number;
+}
+
+/**
+ * Structured API error with HTTP status code and user-friendly message.
+ * Thrown for both network failures and non-2xx responses.
+ *
+ * Usage:
+ *   try { await api.getStatistics() }
+ *   catch (e) {
+ *     if (e instanceof ApiError) {
+ *       console.log(e.status, e.message); // e.g. 404, "Market not found"
+ *     }
+ *   }
+ */
+export class ApiError extends Error {
+  /** HTTP status code, or 0 for network/connection failures. */
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+
+  /** True for client errors (4xx). */
+  get isClientError(): boolean {
+    return this.status >= 400 && this.status < 500;
+  }
+
+  /** True for server errors (5xx). */
+  get isServerError(): boolean {
+    return this.status >= 500;
+  }
+
+  /** True for network/connection failures (status 0). */
+  get isNetworkError(): boolean {
+    return this.status === 0;
+  }
+}
 
 async function request<T>(
   method: HttpMethod,
   path: string,
-  options: { body?: unknown; params?: Record<string, string | number | undefined> } = {}
+  options: RequestOptions = {}
 ): Promise<T> {
   let url = `${BASE_URL}${path}`;
 
@@ -24,20 +71,48 @@ async function request<T>(
     if (str) url += `?${str}`;
   }
 
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-  });
+  // Check cache for GET requests
+  if (method === "GET" && options.cacheTtl) {
+    const cached = apiCache.get<T>(url);
+    if (cached !== null) {
+      return cached;
+    }
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    });
+  } catch (networkErr) {
+    // Network failure (offline, DNS error, CORS, timeout, etc.)
+    const msg = networkErr instanceof Error ? networkErr.message : "Network request failed";
+    throw new ApiError(`Unable to reach the server. Please check your connection. (${msg})`, 0);
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(err?.message ?? `HTTP ${res.status}`);
+    const message = err?.message ?? `HTTP ${res.status}`;
+    throw new ApiError(message, res.status);
   }
 
   // 204 / empty body
   const text = await res.text();
-  return text ? (JSON.parse(text) as T) : (undefined as unknown as T);
+  const data = text ? (JSON.parse(text) as T) : (undefined as unknown as T);
+
+  // Cache GET responses
+  if (method === "GET" && options.cacheTtl) {
+    apiCache.set(url, data, options.cacheTtl);
+  }
+
+  // Invalidate cache on mutations
+  if (method === "POST" || method === "DELETE") {
+    apiCache.invalidateByPattern('.*');
+  }
+
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,7 +122,8 @@ async function request<T>(
 export const api = {
   health: () => request<string>("GET", "/health"),
 
-  getStatistics: () => request<Record<string, unknown>>("GET", "/api/statistics"),
+  getStatistics: () => 
+    request<Record<string, unknown>>("GET", "/api/statistics", { cacheTtl: CACHE_TTL.MEDIUM }),
 
   getFeaturedMarkets: () =>
     request<
@@ -59,29 +135,29 @@ export const api = {
         onchain_volume: string;
         resolved_outcome?: number | null;
       }>
-    >("GET", "/api/markets/featured"),
+    >("GET", "/api/markets/featured", { cacheTtl: CACHE_TTL.SHORT }),
 
   getContent: (params?: { page?: number; page_size?: number }) =>
-    request<Record<string, unknown>>("GET", "/api/content", { params }),
+    request<Record<string, unknown>>("GET", "/api/content", { params, cacheTtl: CACHE_TTL.MEDIUM }),
 
   // Blockchain
   getBlockchainHealth: () =>
-    request<Record<string, unknown>>("GET", "/api/blockchain/health"),
+    request<Record<string, unknown>>("GET", "/api/blockchain/health", { cacheTtl: CACHE_TTL.SHORT }),
 
   getBlockchainMarket: (marketId: number | string) =>
-    request<Record<string, unknown>>("GET", `/api/blockchain/markets/${marketId}`),
+    request<Record<string, unknown>>("GET", `/api/blockchain/markets/${marketId}`, { cacheTtl: CACHE_TTL.MEDIUM }),
 
   getBlockchainStats: () =>
-    request<Record<string, unknown>>("GET", "/api/blockchain/stats"),
+    request<Record<string, unknown>>("GET", "/api/blockchain/stats", { cacheTtl: CACHE_TTL.MEDIUM }),
 
   getUserBets: (user: string, params?: { page?: number; page_size?: number }) =>
-    request<Record<string, unknown>>("GET", `/api/blockchain/users/${user}/bets`, { params }),
+    request<Record<string, unknown>>("GET", `/api/blockchain/users/${user}/bets`, { params, cacheTtl: CACHE_TTL.MEDIUM }),
 
   getOracleResult: (marketId: number | string) =>
-    request<Record<string, unknown>>("GET", `/api/blockchain/oracle/${marketId}`),
+    request<Record<string, unknown>>("GET", `/api/blockchain/oracle/${marketId}`, { cacheTtl: CACHE_TTL.LONG }),
 
   getTransactionStatus: (txHash: string) =>
-    request<Record<string, unknown>>("GET", `/api/blockchain/tx/${txHash}`),
+    request<Record<string, unknown>>("GET", `/api/blockchain/tx/${txHash}`, { cacheTtl: CACHE_TTL.LONG }),
 
   // Newsletter
   newsletterSubscribe: (body: { email: string; source?: string }) =>
@@ -114,7 +190,7 @@ export const api = {
     request<{ invalidated_keys: number }>("POST", `/api/markets/${marketId}/resolve`),
 
   emailPreview: (templateName: string) =>
-    request<Record<string, unknown>>("GET", `/api/v1/email/preview/${templateName}`),
+    request<Record<string, unknown>>("GET", `/api/v1/email/preview/${templateName}`, { cacheTtl: CACHE_TTL.LONG }),
 
   emailSendTest: (body: { recipient: string; template_name: string }) =>
     request<{ success: boolean; message: string; message_id: string }>(
@@ -124,8 +200,8 @@ export const api = {
     ),
 
   getEmailAnalytics: (params?: { template_name?: string; days?: number }) =>
-    request<Record<string, unknown>>("GET", "/api/v1/email/analytics", { params }),
+    request<Record<string, unknown>>("GET", "/api/v1/email/analytics", { params, cacheTtl: CACHE_TTL.MEDIUM }),
 
   getEmailQueueStats: () =>
-    request<Record<string, unknown>>("GET", "/api/v1/email/queue/stats"),
+    request<Record<string, unknown>>("GET", "/api/v1/email/queue/stats", { cacheTtl: CACHE_TTL.SHORT }),
 };

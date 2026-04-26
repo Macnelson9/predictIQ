@@ -7,15 +7,8 @@ Welcome to the PredictIQ documentation! This directory contains comprehensive gu
 ```
 docs/
 ├── README.md                    # This file
-├── gas/                         # Gas optimization documentation
-│   ├── GAS_OPTIMIZATION.md
-│   └── QUICK_START_GAS_OPTIMIZATION.md
-├── security/                    # Security documentation
-│   └── MULTISIG_EMERGENCY_PAUSE.md
-└── quick-reference/             # Quick reference guides
-    ├── QUICK_REFERENCE_ISSUE_14.md
-    ├── QUICK_REFERENCE_ISSUE_12.md
-    └── QUICK_START.md
+├── DISTRIBUTED_TRACING.md       # Distributed tracing setup and usage
+└── (gas/ and security/ guides live in the repo root and services/)
 ```
 
 ## 🚀 Getting Started
@@ -23,81 +16,82 @@ docs/
 ### New to PredictIQ?
 
 1. **[Project README](../README.md)** - Start here for project overview
-2. **[Development Guide](../DEVELOPMENT.md)** - Set up your development environment
-3. **[Quick Start](./quick-reference/QUICK_START.md)** - Get up and running quickly
+2. **[API Specification](../API_SPEC.md)** - API reference and integration guide
+3. **[Changelog](../CHANGELOG.md)** - Release history and notable changes
 
 ### Want to Contribute?
 
-1. **[Contributing Guidelines](../CONTRIBUTING.md)** - Learn how to contribute
-2. **[Architecture Overview](../ARCHITECTURE.md)** - Understand the system design
-3. **[API Specification](../API_SPEC.md)** - API reference and integration guide
+1. **[API Specification](../API_SPEC.md)** - API reference and integration guide
+2. **[Infrastructure README](../infrastructure/README.md)** - Infrastructure and deployment overview
 
 ## 📖 Documentation Categories
+
+### Distributed Tracing
+
+- **[Distributed Tracing Guide](./DISTRIBUTED_TRACING.md)** - OpenTelemetry setup and trace propagation
 
 ### Gas Optimization
 
 Learn how to optimize gas usage in PredictIQ smart contracts:
 
-- **[Gas Optimization Guide](./gas/GAS_OPTIMIZATION.md)** - Comprehensive gas optimization strategies
-- **[Quick Start Gas Optimization](./gas/QUICK_START_GAS_OPTIMIZATION.md)** - Quick tips for gas efficiency
+- **[Gas Benchmarks README](../contracts/predict-iq/.gas-benchmarks/README.md)** - Gas benchmark results and methodology
 
-### Security
+### Infrastructure
 
-Security documentation and best practices:
+- **[Infrastructure README](../infrastructure/README.md)** - Terraform modules, deployment, and rollback
+- **[Rollback Guide](../infrastructure/ROLLBACK.md)** - Emergency rollback procedures
 
-- **[Multisig Emergency Pause](./security/MULTISIG_EMERGENCY_PAUSE.md)** - Emergency pause mechanism documentation
+### Performance
 
-### Quick Reference
+- **[SLO Guide](../performance/SLO_GUIDE.md)** - Service level objectives and error budgets
 
-Quick reference guides for common tasks:
+### API Service
 
-- **[Quick Start Guide](./quick-reference/QUICK_START.md)** - Get started quickly
-- **[Quick Reference](./quick-reference/)** - Command references and cheat sheets
+- **[Database Schema](../services/api/DATABASE.md)** - PostgreSQL schema and migration guide
+- **[Graceful Shutdown](../services/api/GRACEFUL_SHUTDOWN.md)** - Shutdown behaviour and configuration
+- **[Tracing](../services/api/TRACING.md)** - API service tracing configuration
 
 ## 🔍 Finding Documentation
 
 ### By Role
 
 **Developers:**
-- [Development Guide](../DEVELOPMENT.md)
-- [Architecture](../ARCHITECTURE.md)
 - [API Specification](../API_SPEC.md)
-- [Gas Optimization](./gas/)
+- [Database Schema](../services/api/DATABASE.md)
+- [Gas Benchmarks](../contracts/predict-iq/.gas-benchmarks/README.md)
+- [Distributed Tracing](./DISTRIBUTED_TRACING.md)
 
-**Contributors:**
-- [Contributing Guidelines](../CONTRIBUTING.md)
-- [Development Guide](../DEVELOPMENT.md)
-- [Quick Reference](./quick-reference/)
+**Operators / DevOps:**
+- [Infrastructure README](../infrastructure/README.md)
+- [Rollback Guide](../infrastructure/ROLLBACK.md)
+- [SLO Guide](../performance/SLO_GUIDE.md)
 
 **Users:**
 - [Project README](../README.md)
-- [Quick Start](./quick-reference/QUICK_START.md)
 - [API Specification](../API_SPEC.md)
 
 ### By Topic
 
 **Smart Contracts:**
-- [Architecture](../ARCHITECTURE.md)
-- [Gas Optimization](./gas/GAS_OPTIMIZATION.md)
-- [Development Guide](../DEVELOPMENT.md)
+- [Gas Benchmarks](../contracts/predict-iq/.gas-benchmarks/README.md)
 
-**Security:**
-- [Security Documentation](./security/)
-- [Architecture - Security Section](../ARCHITECTURE.md#security-architecture)
+**Observability:**
+- [Distributed Tracing](./DISTRIBUTED_TRACING.md)
+- [API Tracing](../services/api/TRACING.md)
 
 **Integration:**
 - [API Specification](../API_SPEC.md)
-- [Development Guide](../DEVELOPMENT.md)
+- [Database Schema](../services/api/DATABASE.md)
 
 ## 🤝 Contributing to Documentation
 
 Found an error or want to improve the documentation?
 
-1. Check [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines
-2. Documentation follows the same PR process as code
-3. Use clear, concise language
-4. Include code examples where applicable
-5. Keep documentation up to date with code changes
+1. Documentation follows the same PR process as code
+2. Use clear, concise language
+3. Include code examples where applicable
+4. Keep documentation up to date with code changes
+5. Verify all links resolve before submitting
 
 ### Documentation Standards
 
@@ -132,11 +126,10 @@ When creating or updating documentation:
 
 Have suggestions for improving our documentation?
 
-- Open an issue on [GitHub](https://github.com/your-org/predict-iq/issues)
-- Join our [Discord](https://discord.gg/predictiq)
+- Open an issue on [GitHub](https://github.com/solutions-plug/predictIQ/issues)
 - Submit a PR with improvements
 
 ---
 
-**Last Updated:** 2024  
+**Last Updated:** 2026-04-26  
 **Maintained By:** PredictIQ Team

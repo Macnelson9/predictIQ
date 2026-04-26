@@ -1,0 +1,11 @@
+environment         = "staging"
+aws_region          = "us-east-1"
+vpc_cidr_block      = "10.1.0.0/16"
+db_instance_class   = "db.t3.small"
+allocated_storage   = 50
+backup_retention_days = 14
+redis_node_type     = "cache.t3.small"
+redis_num_nodes     = 2
+api_desired_count   = 2
+api_cpu             = 512
+api_memory          = 1024

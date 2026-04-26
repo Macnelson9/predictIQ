@@ -1,0 +1,322 @@
+name: Contract Deployment Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'contracts/predict-iq/**'
+      - '.github/workflows/contract-deployment.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'testnet'
+        type: choice
+        options:
+          - testnet
+          - mainnet
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: Build and Test Contracts
+    runs-on: ubuntu-latest
+    outputs:
+      wasm-path: ${{ steps.build.outputs.wasm-path }}
+      contract-hash: ${{ steps.build.outputs.contract-hash }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Soroban CLI
+        run: cargo install --locked soroban-cli --features opt
+
+      - name: Run unit tests
+        run: cargo test --lib --workspace
+        working-directory: contracts/predict-iq
+
+      - name: Run integration tests
+        run: cargo test --test '*' --workspace
+        working-directory: contracts/predict-iq
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: contracts/predict-iq
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        working-directory: contracts/predict-iq
+
+      - name: Build optimized WASM
+        id: build
+        run: |
+          cargo build --target wasm32-unknown-unknown --release
+          soroban contract optimize \
+            --wasm target/wasm32-unknown-unknown/release/predict_iq.wasm \
+            --wasm-out target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm
+          
+          # Output paths for artifact upload
+          echo "wasm-path=target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm" >> $GITHUB_OUTPUT
+          
+          # Calculate contract hash for versioning
+          CONTRACT_HASH=$(sha256sum target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm | cut -d' ' -f1)
+          echo "contract-hash=${CONTRACT_HASH}" >> $GITHUB_OUTPUT
+          echo "Contract hash: ${CONTRACT_HASH}"
+        working-directory: contracts/predict-iq
+
+      - name: Verify WASM size
+        run: |
+          size=$(stat -f%z target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm 2>/dev/null || stat -c%s target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm)
+          echo "Optimized WASM size: $size bytes"
+          max_size=65536
+          if [ $size -gt $max_size ]; then
+            echo "WASM size $size exceeds limit of $max_size bytes"
+            exit 1
+          fi
+        working-directory: contracts/predict-iq
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm
+          path: contracts/predict-iq/target/wasm32-unknown-unknown/release/predict_iq_optimized.wasm
+          retention-days: 30
+
+  deploy-testnet:
+    name: Deploy to Testnet
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'testnet'
+    environment:
+      name: testnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: ./artifacts
+
+      - name: Install Soroban CLI
+        run: |
+          cargo install --locked soroban-cli --features opt
+
+      - name: Configure Soroban for Testnet
+        run: |
+          soroban config network add testnet \
+            --rpc-url https://soroban-testnet.stellar.org:443 \
+            --network-passphrase "Test SDF Network ; September 2015"
+
+      - name: Deploy contract to Testnet
+        env:
+          SOROBAN_ACCOUNT: ${{ secrets.SOROBAN_TESTNET_ACCOUNT }}
+          SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_TESTNET_SECRET_KEY }}
+        run: |
+          soroban contract deploy \
+            --wasm ./artifacts/predict_iq_optimized.wasm \
+            --source-account $SOROBAN_ACCOUNT \
+            --network testnet
+
+      - name: Create deployment artifact
+        run: |
+          cat > deployment-info.json <<EOF
+          {
+            "environment": "testnet",
+            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "commit": "${{ github.sha }}",
+            "contract_hash": "${{ needs.build-and-test.outputs.contract-hash }}",
+            "deployed_by": "${{ github.actor }}"
+          }
+          EOF
+
+      - name: Upload deployment info
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment-${{ github.run_id }}
+          path: deployment-info.json
+          retention-days: 90
+
+      - name: Comment on PR with deployment info
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `✅ Contract deployed to **Testnet**\n\n- Commit: ${context.sha.substring(0, 7)}\n- Contract Hash: ${{ needs.build-and-test.outputs.contract-hash }}\n- Timestamp: ${new Date().toISOString()}`
+            })
+
+  deploy-mainnet:
+    name: Deploy to Mainnet
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: mainnet
+      # Require manual approval for mainnet deployments
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: ./artifacts
+
+      - name: Install Soroban CLI
+        run: |
+          cargo install --locked soroban-cli --features opt
+
+      - name: Configure Soroban for Mainnet
+        run: |
+          soroban config network add mainnet \
+            --rpc-url https://soroban-mainnet.stellar.org:443 \
+            --network-passphrase "Public Global Stellar Network ; September 2015"
+
+      - name: Deploy contract to Mainnet
+        env:
+          SOROBAN_ACCOUNT: ${{ secrets.SOROBAN_MAINNET_ACCOUNT }}
+          SOROBAN_SECRET_KEY: ${{ secrets.SOROBAN_MAINNET_SECRET_KEY }}
+        run: |
+          soroban contract deploy \
+            --wasm ./artifacts/predict_iq_optimized.wasm \
+            --source-account $SOROBAN_ACCOUNT \
+            --network mainnet
+
+      - name: Create deployment artifact
+        run: |
+          cat > deployment-info.json <<EOF
+          {
+            "environment": "mainnet",
+            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "commit": "${{ github.sha }}",
+            "contract_hash": "${{ needs.build-and-test.outputs.contract-hash }}",
+            "deployed_by": "${{ github.actor }}"
+          }
+          EOF
+
+      - name: Upload deployment info
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainnet-deployment-${{ github.run_id }}
+          path: deployment-info.json
+          retention-days: 90
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: contract-${{ needs.build-and-test.outputs.contract-hash }}
+          release_name: Contract Deployment ${{ needs.build-and-test.outputs.contract-hash }}
+          body: |
+            Mainnet deployment of PredictIQ contract
+            
+            - Commit: ${{ github.sha }}
+            - Contract Hash: ${{ needs.build-and-test.outputs.contract-hash }}
+            - Timestamp: ${{ github.event.head_commit.timestamp }}
+          draft: false
+          prerelease: false
+
+  version-artifacts:
+    name: Version and Archive Artifacts
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: contract-wasm
+          path: ./artifacts
+
+      - name: Create versioned artifact
+        run: |
+          VERSION=$(git describe --tags --always)
+          mkdir -p versioned-artifacts
+          cp ./artifacts/predict_iq_optimized.wasm versioned-artifacts/predict_iq_${VERSION}.wasm
+          
+          cat > versioned-artifacts/manifest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "commit": "${{ github.sha }}",
+            "contract_hash": "${{ needs.build-and-test.outputs.contract-hash }}",
+            "build_timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "filename": "predict_iq_${VERSION}.wasm"
+          }
+          EOF
+
+      - name: Upload versioned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: versioned-contract-artifacts
+          path: versioned-artifacts/
+          retention-days: 365
+
+  notify-deployment:
+    name: Notify Deployment Status
+    needs: [build-and-test, deploy-testnet]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Determine deployment status
+        run: |
+          if [ "${{ needs.deploy-testnet.result }}" == "success" ]; then
+            echo "DEPLOYMENT_STATUS=✅ Success" >> $GITHUB_ENV
+          else
+            echo "DEPLOYMENT_STATUS=❌ Failed" >> $GITHUB_ENV
+          fi
+
+      - name: Send Slack notification
+        if: vars.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Contract Deployment ${{ env.DEPLOYMENT_STATUS }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Contract Deployment ${{ env.DEPLOYMENT_STATUS }}*\n*Commit:* ${{ github.sha }}\n*Contract Hash:* ${{ needs.build-and-test.outputs.contract-hash }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

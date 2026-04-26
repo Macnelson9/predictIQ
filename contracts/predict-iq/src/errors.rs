@@ -39,19 +39,18 @@ pub enum ErrorCode {
     UpgradeFailed = 132,
     ParentMarketNotResolved = 133,
     ParentMarketInvalidOutcome = 134,
-    // Issue 5 / Issue 27: SAC error codes that were missing
-    AssetClawedBack = 135,
-    StalePrice = 136,
-    ConfidenceTooLow = 137,
-    // Issue 3: Governance token not configured
-    GovernanceTokenNotSet = 138,
-    // Issue 37: Insufficient voting weight
-    InsufficientVotingWeight = 139,
-    // Misc
-    BetNotFound = 140,
-    ResolutionNotReady = 141,
-    DisputeWindowStillOpen = 142,
-    NoMajorityReached = 143,
-    GuardianMajorityRequired = 144,
-    MarketNotCancelled = 145,
+    ResolutionNotReady = 135,
+    DisputeWindowStillOpen = 136,
+    NoMajorityReached = 137,
+    StalePrice = 138,
+    ConfidenceTooLow = 139,
+    InsufficientVotingWeight = 140,
+    MarketNotCancelled = 141,
+    BetNotFound = 142,
+    UpgradeAlreadyPending = 143,
+    UpgradeHashInCooldown = 144,
+    InvalidAmount = 145,
+    GovernanceTokenNotSet = 146,
+    MarketNotResolved = 147,
+    InvalidDeadline = 148,
 }
