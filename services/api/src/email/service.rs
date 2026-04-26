@@ -1,8 +1,48 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
+use validator::ValidateEmail;
 
 use crate::config::Config;
 use crate::email::templates::EmailTemplateEngine;
+
+/// Validate and sanitize an email address before use.
+///
+/// - Trims surrounding whitespace.
+/// - Rejects addresses that exceed 254 characters (RFC 5321 limit).
+/// - Validates RFC 5322 format via the `validator` crate.
+///
+/// Returns the trimmed address on success, or an error with context logged
+/// at WARN level so operators can trace bad inputs.
+pub fn sanitize_email(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().to_string();
+
+    if trimmed.is_empty() {
+        tracing::warn!(raw_input = raw, "Email validation failed: address is empty");
+        anyhow::bail!("email address must not be empty");
+    }
+
+    if trimmed.len() > 254 {
+        tracing::warn!(
+            raw_input = raw,
+            length = trimmed.len(),
+            "Email validation failed: address exceeds 254-character RFC 5321 limit"
+        );
+        anyhow::bail!(
+            "email address is too long ({} chars, max 254)",
+            trimmed.len()
+        );
+    }
+
+    if !trimmed.validate_email() {
+        tracing::warn!(
+            raw_input = raw,
+            "Email validation failed: address does not conform to RFC 5322"
+        );
+        anyhow::bail!("invalid email address: '{trimmed}'");
+    }
+
+    Ok(trimmed)
+}
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -32,6 +72,11 @@ impl EmailService {
         template_name: &str,
         template_data: &Value,
     ) -> Result<String> {
+        // Sanitize and validate before touching the SendGrid API.
+        let recipient = sanitize_email(recipient)
+            .with_context(|| format!("rejecting send_email for template '{template_name}'"))?;
+        let recipient = recipient.as_str();
+
         let api_key = self
             .config
             .sendgrid_api_key
@@ -178,5 +223,70 @@ mod tests {
         assert!(!preview.subject.is_empty());
         assert!(preview.html_content.contains("confirm"));
         assert!(preview.text_content.contains("confirm"));
+    }
+
+    // ---- sanitize_email unit tests ----
+
+    #[test]
+    fn valid_address_passes() {
+        assert!(sanitize_email("user@example.com").is_ok());
+    }
+
+    #[test]
+    fn whitespace_is_trimmed() {
+        let result = sanitize_email("  user@example.com  ").unwrap();
+        assert_eq!(result, "user@example.com");
+    }
+
+    #[test]
+    fn empty_string_is_rejected() {
+        assert!(sanitize_email("").is_err());
+        assert!(sanitize_email("   ").is_err());
+    }
+
+    #[test]
+    fn missing_at_sign_is_rejected() {
+        assert!(sanitize_email("notanemail").is_err());
+    }
+
+    #[test]
+    fn missing_domain_is_rejected() {
+        assert!(sanitize_email("user@").is_err());
+    }
+
+    #[test]
+    fn missing_local_part_is_rejected() {
+        assert!(sanitize_email("@example.com").is_err());
+    }
+
+    #[test]
+    fn address_exceeding_254_chars_is_rejected() {
+        // local part 64 chars + @ + domain that pushes total over 254
+        let local = "a".repeat(64);
+        let domain = "b".repeat(190);
+        let addr = format!("{local}@{domain}.com");
+        assert!(addr.len() > 254);
+        assert!(sanitize_email(&addr).is_err());
+    }
+
+    #[test]
+    fn subaddress_plus_tag_is_accepted() {
+        assert!(sanitize_email("user+tag@example.com").is_ok());
+    }
+
+    #[test]
+    fn subdomain_address_is_accepted() {
+        assert!(sanitize_email("user@mail.example.co.uk").is_ok());
+    }
+
+    #[test]
+    fn double_at_sign_is_rejected() {
+        assert!(sanitize_email("user@@example.com").is_err());
+    }
+
+    #[test]
+    fn newline_injection_attempt_is_rejected() {
+        // A newline in the address would be invalid per RFC 5322.
+        assert!(sanitize_email("user\n@example.com").is_err());
     }
 }
