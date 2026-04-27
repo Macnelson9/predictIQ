@@ -1,6 +1,7 @@
 # PredictIQ Contract API Specification
 
 > Reflects the on-chain implementation as of the current `contracts/predict-iq` source.
+> **Spec version:** 1.1.0 — updated 2026-04-27 (issues #485: error code values corrected to match `#[repr(u32)]` enum; events table expanded with missing events and corrected topic layouts)
 
 ---
 
@@ -341,56 +342,55 @@ Filters by `Active | PendingResolution | Disputed | Resolved | Cancelled`. Itera
 
 | Code | Value | Description |
 |------|-------|-------------|
-| `AlreadyInitialized` | 1 | Contract already initialized |
-| `NotAuthorized` | 2 | Caller lacks required authorization |
-| `GuardianNotSet` | 3 | Guardian account not configured |
-| `MarketNotFound` | 4 | No market with the given ID |
-| `MarketClosed` | 5 | Market deadline has passed |
-| `MarketStillActive` | 6 | Market is still accepting bets |
-| `MarketNotActive` | 7 | Market is not in Active state |
-| `MarketNotResolved` | 8 | Market has not been resolved yet |
-| `MarketNotDisputed` | 9 | Market is not in Disputed state |
-| `MarketNotPendingResolution` | 10 | Market is not in PendingResolution state |
-| `CannotChangeOutcome` | 11 | Outcome is already finalized |
-| `InvalidDeadline` | 12 | Deadline is in the past or malformed |
-| `DeadlinePassed` | 13 | Action attempted after deadline |
-| `ResolutionDeadlinePassed` | 14 | Resolution deadline has elapsed |
-| `ResolutionNotReady` | 15 | Conditions for resolution not yet met |
-| `GracePeriodActive` | 16 | Grace period has not elapsed |
-| `MarketIdOverflow` | 17 | Market ID counter overflowed |
-| `MarketIdCollision` | 18 | Market ID already in use |
-| `InvalidOutcome` | 19 | Outcome index out of range |
-| `TooManyOutcomes` | 20 | Exceeds `MAX_OUTCOMES_PER_MARKET` (32) |
-| `InvalidBetAmount` | 21 | Bet amount is zero or below minimum |
-| `InsufficientBalance` | 22 | Caller token balance too low |
-| `InsufficientDeposit` | 23 | Creation deposit not met |
-| `InvalidAmount` | 24 | Generic invalid amount |
-| `BetNotFound` | 25 | No bet record for this bettor/market |
-| `NoWinnings` | 26 | Bettor did not back the winning outcome |
-| `AlreadyClaimed` | 27 | Winnings or refund already claimed |
-| `OracleFailure` | 28 | Oracle cross-contract call failed |
-| `StalePrice` | 29 | Price feed `publish_time` older than `max_staleness_seconds` |
-| `ConfidenceTooLow` | 30 | Oracle confidence interval exceeds `max_confidence_bps` |
-| `InvalidTimestamp` | 31 | Timestamp value is invalid |
-| `AssetClawedBack` | 32 | SAC token clawback reduced contract balance unexpectedly |
-| `TransferFailed` | 33 | SAC token transfer failed programmatically |
-| `DisputeWindowClosed` | 34 | Dispute window has expired |
-| `DisputeWindowStillOpen` | 35 | Dispute window has not yet closed |
-| `AlreadyVoted` | 36 | Address has already cast a vote |
-| `InsufficientVotes` | 37 | Not enough votes to proceed |
-| `InsufficientVotingWeight` | 38 | Voter's governance token balance too low |
-| `NoMajorityReached` | 39 | No outcome reached the 60% majority threshold |
-| `GovernanceTokenNotSet` | 40 | Governance token address not configured |
-| `TimelockActive` | 41 | Upgrade timelock has not elapsed |
-| `UpgradeNotInitiated` | 42 | No pending upgrade to act on |
-| `AlreadyVotedOnUpgrade` | 43 | Address already voted on this upgrade |
-| `UpgradeAlreadyPending` | 44 | An upgrade proposal is already pending |
-| `UpgradeHashInCooldown` | 45 | This wasm hash is in the 7-day cooldown period |
-| `ParentMarketNotResolved` | 46 | Conditional market's parent is not yet resolved |
-| `ParentMarketInvalidOutcome` | 47 | Parent market resolved to a different outcome |
-| `ContractPaused` | 48 | Contract is paused via circuit breaker |
-| `InvalidReferrer` | 49 | Referrer address is invalid or self-referral |
-| `VotingPeriodNotElapsed` | 50 | Admin fallback called before 72-hour voting window elapsed |
+| `AlreadyInitialized` | 100 | Contract already initialized |
+| `NotAuthorized` | 101 | Caller lacks required authorization |
+| `MarketNotFound` | 102 | No market with the given ID |
+| `MarketClosed` | 103 | Market deadline has passed |
+| `MarketStillActive` | 104 | Market is still accepting bets |
+| `InvalidOutcome` | 105 | Outcome index out of range |
+| `InvalidBetAmount` | 106 | Bet amount is zero or below minimum |
+| `InsufficientBalance` | 107 | Caller token balance too low |
+| `OracleFailure` | 108 | Oracle cross-contract call failed |
+| `CircuitBreakerOpen` | 109 | Circuit breaker is open; operation blocked |
+| `DisputeWindowClosed` | 110 | Dispute window has expired |
+| `VotingNotStarted` | 111 | Voting period has not begun |
+| `VotingEnded` | 112 | Voting period has already ended |
+| `AlreadyVoted` | 113 | Address has already cast a vote |
+| `FeeTooHigh` | 114 | Proposed fee exceeds allowed maximum |
+| `MarketNotActive` | 115 | Market is not in Active state |
+| `DeadlinePassed` | 116 | Action attempted after deadline |
+| `CannotChangeOutcome` | 117 | Outcome is already finalized |
+| `MarketNotDisputed` | 118 | Market is not in Disputed state |
+| `MarketNotPendingResolution` | 119 | Market is not in PendingResolution state |
+| `AdminNotSet` | 120 | Admin account not configured |
+| `ContractPaused` | 121 | Contract is paused via circuit breaker |
+| `GuardianNotSet` | 122 | Guardian account not configured |
+| `TooManyOutcomes` | 123 | Exceeds `MAX_OUTCOMES_PER_MARKET` (32) |
+| `TooManyWinners` | 124 | Exceeds maximum push-payout winner threshold |
+| `PayoutModeNotSupported` | 125 | Requested payout mode is not supported |
+| `InsufficientDeposit` | 126 | Creation deposit not met |
+| `TimelockActive` | 127 | Upgrade timelock has not elapsed |
+| `UpgradeNotInitiated` | 128 | No pending upgrade to act on |
+| `InsufficientVotes` | 129 | Not enough votes to proceed |
+| `AlreadyVotedOnUpgrade` | 130 | Address already voted on this upgrade |
+| `InvalidWasmHash` | 131 | Provided wasm hash is invalid |
+| `UpgradeFailed` | 132 | Upgrade execution failed |
+| `ParentMarketNotResolved` | 133 | Conditional market's parent is not yet resolved |
+| `ParentMarketInvalidOutcome` | 134 | Parent market resolved to a different outcome |
+| `ResolutionNotReady` | 135 | Conditions for resolution not yet met |
+| `DisputeWindowStillOpen` | 136 | Dispute window has not yet closed |
+| `NoMajorityReached` | 137 | No outcome reached the 60% majority threshold |
+| `StalePrice` | 138 | Price feed `publish_time` older than `max_staleness_seconds` |
+| `ConfidenceTooLow` | 139 | Oracle confidence interval exceeds `max_confidence_bps` |
+| `InsufficientVotingWeight` | 140 | Voter's governance token balance too low |
+| `MarketNotCancelled` | 141 | Market is not in Cancelled state |
+| `BetNotFound` | 142 | No bet record for this bettor/market |
+| `UpgradeAlreadyPending` | 143 | An upgrade proposal is already pending |
+| `UpgradeHashInCooldown` | 144 | This wasm hash is in the 7-day cooldown period |
+| `InvalidAmount` | 145 | Generic invalid amount |
+| `GovernanceTokenNotSet` | 146 | Governance token address not configured |
+| `MarketNotResolved` | 147 | Market has not been resolved yet |
+| `InvalidDeadline` | 148 | Deadline is in the past or malformed |
 
 ---
 
@@ -401,28 +401,40 @@ All events follow the topic layout:
 - **Topic 1:** `market_id: u64` (primary indexer key; `0` for contract-level events)
 - **Topic 2:** Triggering address
 
-| Event | Topic Symbol | Data Payload |
-|-------|-------------|--------------|
-| MarketCreated | `mkt_creat` | `(description: String, num_outcomes: u32, deadline: u64)` |
-| BetPlaced | `bet_place` | `(outcome: u32, amount: i128)` |
-| DisputeFiled | `disp_file` | `new_deadline: u64` |
-| ResolutionFinalized | `resolv_fx` | `(winning_outcome: u32, total_payout: i128)` |
-| RewardsClaimed | `reward_fx` | `(amount: i128, token_address: Address, is_refund: bool)` |
-| VoteCast | `vote_cast` | `(outcome: u32, weight: i128)` |
-| CircuitBreakerTriggered | `cb_state` | `state: String` |
-| OracleResultSet | `oracle_ok` | `outcome: u32` |
-| OracleResolved | `orcl_res` | `outcome: u32` |
-| MarketFinalized | `mkt_final` | `winning_outcome: u32` |
-| DisputeResolved | `disp_res` | `winning_outcome: u32` |
-| MarketCancelled (admin) | `mkt_cncl` | `()` |
-| MarketCancelledVote (community) | `mk_cn_vt` | `()` |
-| ReferralReward | `ref_rwrd` | `amount: i128` |
-| ReferralClaimed | `ref_claim` | `amount: i128` |
-| CircuitBreakerAuto | `cb_auto` | `error_count: u32` |
-| MonitoringStateReset | `mon_reset` | `(previous_error_count: u32, previous_last_observation: u64)` |
-| FeeCollected | `fee_colct` | `amount: i128` |
-| AdminFallbackResolution | `adm_fbk` | `winning_outcome: u32` |
-| CreatorReputationSet | `rep_set` | `(old_score: u32, new_score: u32)` |
-| CreationDepositSet | `dep_set` | `(old_amount: i128, new_amount: i128)` |
+| Event | Topic Symbol | Topics | Data Payload |
+|-------|-------------|--------|--------------|
+| MarketCreated | `mkt_creat` | `(mkt_creat, market_id, creator)` | `(description: String, num_outcomes: u32, deadline: u64)` |
+| BetPlaced | `bet_place` | `(bet_place, market_id, bettor)` | `(outcome: u32, amount: i128)` |
+| DisputeFiled | `disp_file` | `(disp_file, market_id, disciplinarian)` | `new_deadline: u64` |
+| ResolutionFinalized | `resolv_fx` | `(resolv_fx, market_id, resolver)` | `(winning_outcome: u32, total_payout: i128)` |
+| RewardsClaimed | `reward_fx` | `(reward_fx, market_id, claimer)` | `(amount: i128, token_address: Address, is_refund: bool)` |
+| VoteCast | `vote_cast` | `(vote_cast, market_id, voter)` | `(outcome: u32, weight: i128)` |
+| CircuitBreakerTriggered | `cb_state` | `(cb_state, 0, contract_address)` | `state: String` |
+| OracleResultSet | `oracle_ok` | `(oracle_ok, market_id, oracle_source)` | `(oracle_id: u32, outcome: u32)` |
+| OracleResolved | `orcl_res` | `(orcl_res, market_id, oracle_address)` | `outcome: u32` |
+| MarketFinalized | `mkt_final` | `(mkt_final, market_id, resolver)` | `winning_outcome: u32` |
+| DisputeResolved | `disp_res` | `(disp_res, market_id, resolver)` | `winning_outcome: u32` |
+| MarketCancelled (admin) | `mkt_cncl` | `(mkt_cncl, market_id, admin)` | `()` |
+| MarketCancelledVote (community) | `mk_cn_vt` | `(mk_cn_vt, market_id, resolver)` | `()` |
+| ReferralReward | `ref_rwrd` | `(ref_rwrd, market_id, referrer)` | `amount: i128` |
+| ReferralClaimed | `ref_claim` | `(ref_claim, market_id, claimer)` | `amount: i128` |
+| ReferralDistribution | `ref_dist` | `(ref_dist, market_id, token)` | `()` |
+| CircuitBreakerAuto | `cb_auto` | `(cb_auto, 0, contract_address)` | `error_count: u32` |
+| FeeCollected | `fee_colct` | `(fee_colct, 0, contract_address)` | `amount: i128` |
+| AdminFallbackResolution | `adm_fbk` | `(adm_fbk, market_id, admin)` | `winning_outcome: u32` |
+| CreatorReputationSet | `rep_set` | `(rep_set, creator)` | `(old_score: u32, new_score: u32)` |
+| CreationDepositSet | `dep_set` | `(dep_set,)` | `(old_amount: i128, new_amount: i128)` |
+| MonitoringStateReset | `mon_reset` | `(mon_reset, resetter)` | `(previous_error_count: u32, previous_last_observation: u64)` |
+| MarketPruned | `mkt_prune` | `(mkt_prune, market_id)` | `pruned_at: u64` |
+| UpgradeInitiated | `upg_init` | `(upg_init, initiator)` | `wasm_hash: BytesN<32>` |
+| UpgradeVoted | `upg_vote` | `(upg_vote, voter)` | `vote_for: bool` |
+| UpgradeExecuted | `upg_exec` | `(upg_exec, executor)` | `wasm_hash: BytesN<32>` |
+| UpgradeRejected | `upg_rej` | `(upg_rej,)` | `wasm_hash: BytesN<32>` |
+| MarketStateChanged | `mkt_state` | `(mkt_state, market_id)` | `(old_status: String, new_status: String, timestamp: u64)` |
 
-> **Note:** `MonitoringStateReset`, `CircuitBreakerTriggered`, `CircuitBreakerAuto`, and `FeeCollected` use `market_id = 0` and the contract address as Topic 2. `CreatorReputationSet` uses `(symbol, creator)` with no `market_id`. `CreationDepositSet` uses `(symbol,)` only.
+> **Notes:**
+> - `CircuitBreakerTriggered`, `CircuitBreakerAuto`, and `FeeCollected` use `market_id = 0` and the contract address as Topic 2.
+> - `CreatorReputationSet` uses `(symbol, creator)` with no `market_id`.
+> - `CreationDepositSet` uses `(symbol,)` only.
+> - `MonitoringStateReset` uses `(symbol, resetter)` with no `market_id`.
+> - `OracleResultSet` data includes `oracle_id` to identify which oracle source reported the result (multi-oracle support).

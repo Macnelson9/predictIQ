@@ -194,15 +194,50 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone());
 
     let admin_routes = Router::new()
-        .route("/api/v1/markets/:market_id/resolve", post(handlers::resolve_market))
-        .route("/api/blockchain/replay", post(handlers::blockchain_replay))
-        .route("/api/v1/email/preview/:template_name", get(handlers::email_preview))
-        .route("/api/v1/email/test", post(handlers::email_send_test))
-        .route("/api/v1/email/analytics", get(handlers::email_analytics))
-        .route("/api/v1/email/queue/stats", get(handlers::email_queue_stats))
-        .route("/api/v1/audit/logs", get(handlers::audit_logs))
-        .route("/api/v1/audit/statistics", get(handlers::audit_statistics))
-        .layer(middleware::from_fn_with_state(state.clone(), idempotency::idempotency_middleware))
+        .route(
+            "/api/v1/markets/:market_id/resolve",
+            post(handlers::resolve_market),
+        )
+        .route(
+            "/api/blockchain/replay",
+            post(handlers::blockchain_replay),
+        )
+        .route(
+            "/api/v1/email/preview/:template_name",
+            get(handlers::email_preview),
+        )
+        .route(
+            "/api/v1/email/test",
+            post(handlers::email_send_test),
+        )
+        .route(
+            "/api/v1/email/analytics",
+            get(handlers::email_analytics),
+        )
+        .route(
+            "/api/v1/email/queue/stats",
+            get(handlers::email_queue_stats),
+        )
+        .route(
+            "/api/v1/email/queue/dead-letter",
+            get(handlers::email_dead_letter_list),
+        )
+        .route(
+            "/api/v1/email/queue/dead-letter/:job_id/requeue",
+            post(handlers::email_dead_letter_requeue),
+        )
+        .route(
+            "/api/v1/audit/logs",
+            get(handlers::audit_logs),
+        )
+        .route(
+            "/api/v1/audit/statistics",
+            get(handlers::audit_statistics),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            idempotency::idempotency_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             (ip_whitelist.clone(), security::TrustProxy(config_trust_proxy)),
             security::ip_whitelist_middleware,

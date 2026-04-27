@@ -15,6 +15,7 @@ use crate::shutdown::ShutdownCoordinator;
 const EMAIL_QUEUE_KEY: &str = "email:queue";
 const EMAIL_PROCESSING_KEY: &str = "email:processing";
 const EMAIL_RETRY_KEY: &str = "email:retry";
+const EMAIL_DEAD_LETTER_KEY: &str = "email:dead_letter";
 
 #[derive(Clone)]
 pub struct EmailQueue {
@@ -155,10 +156,17 @@ impl EmailQueue {
                     error
                 );
             } else {
-                // Max attempts reached, mark as permanently failed
+                // Max attempts reached — mark as permanently failed and move to dead-letter set.
                 self.db
                     .email_update_job_status(job_id, EmailJobStatus::Failed.as_str(), Some(error))
                     .await?;
+
+                let mut conn = self.cache.manager.clone();
+                let failed_at = chrono::Utc::now().timestamp() as f64;
+                let _: () = conn
+                    .zadd(EMAIL_DEAD_LETTER_KEY, job_id.to_string(), failed_at)
+                    .await
+                    .context("Failed to add job to dead-letter set")?;
 
                 tracing::error!(
                     "Email job {} permanently failed after {} attempts: {}",
@@ -209,6 +217,48 @@ impl EmailQueue {
         Ok(count)
     }
 
+    /// List all job IDs currently in the dead-letter set (oldest-failed first).
+    pub async fn list_dead_letter(&self) -> Result<Vec<Uuid>> {
+        let mut conn = self.cache.manager.clone();
+        let items: Vec<String> = conn
+            .zrange(EMAIL_DEAD_LETTER_KEY, 0isize, -1isize)
+            .await
+            .context("Failed to list dead-letter set")?;
+
+        items
+            .iter()
+            .map(|s| Uuid::parse_str(s).context("Invalid UUID in dead-letter set"))
+            .collect()
+    }
+
+    /// Move a job from the dead-letter set back to the main queue for reprocessing.
+    pub async fn requeue_dead_letter(&self, job_id: Uuid) -> Result<bool> {
+        let mut conn = self.cache.manager.clone();
+
+        let removed: usize = conn
+            .zrem(EMAIL_DEAD_LETTER_KEY, job_id.to_string())
+            .await
+            .context("Failed to remove job from dead-letter set")?;
+
+        if removed == 0 {
+            return Ok(false);
+        }
+
+        // Reset DB status so the worker will pick it up again.
+        self.db
+            .email_update_job_status(job_id, crate::email::types::EmailJobStatus::Pending.as_str(), None)
+            .await?;
+
+        let score = chrono::Utc::now().timestamp() as f64;
+        let _: () = conn
+            .zadd(EMAIL_QUEUE_KEY, job_id.to_string(), score)
+            .await
+            .context("Failed to re-enqueue dead-letter job")?;
+
+        tracing::info!("Requeued dead-letter email job: {}", job_id);
+        Ok(true)
+    }
+
     /// Get queue statistics
     pub async fn get_stats(&self) -> Result<QueueStats> {
         let mut conn = self.cache.manager.clone();
@@ -228,10 +278,16 @@ impl EmailQueue {
             .await
             .context("Failed to get retry count")?;
 
+        let dead_letter: usize = conn
+            .zcard(EMAIL_DEAD_LETTER_KEY)
+            .await
+            .context("Failed to get dead-letter count")?;
+
         Ok(QueueStats {
             pending,
             processing,
             retry,
+            dead_letter,
         })
     }
 
@@ -395,4 +451,5 @@ pub struct QueueStats {
     pub pending: usize,
     pub processing: usize,
     pub retry: usize,
+    pub dead_letter: usize,
 }
