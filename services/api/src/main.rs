@@ -219,7 +219,10 @@ async fn main() -> anyhow::Result<()> {
     let webhook_routes = Router::new()
         .route("/webhooks/sendgrid", post(handlers::sendgrid_webhook))
         .layer(middleware::from_fn_with_state(
-            state.config.sendgrid_webhook_secret.clone(),
+            security::WebhookConfig {
+                secret: state.config.sendgrid_webhook_secret.clone(),
+                replay_window_secs: state.config.webhook_replay_window_secs,
+            },
             security::sendgrid_webhook_middleware,
         ))
         .layer(middleware::from_fn(correlation::correlation_id_middleware))

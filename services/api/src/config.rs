@@ -169,6 +169,8 @@ pub struct Config {
     pub trust_proxy: bool,
     pub request_signing_secret: Option<String>,
     pub sendgrid_webhook_secret: Option<String>,
+    /// Webhook replay protection window in seconds. Default: 300 (5 minutes).
+    pub webhook_replay_window_secs: u64,
     pub trusted_proxy_cidrs: Vec<IpNet>,
     /// When `true` the `/metrics` endpoint is publicly accessible (no auth).
     /// Defaults to `false`. Set `METRICS_PUBLIC=true` only in trusted environments.
@@ -344,6 +346,10 @@ impl Config {
                 .unwrap_or(true),
             request_signing_secret: env::var("REQUEST_SIGNING_SECRET").ok(),
             sendgrid_webhook_secret: env::var("SENDGRID_WEBHOOK_SECRET").ok(),
+            webhook_replay_window_secs: env::var("WEBHOOK_REPLAY_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300),
             trusted_proxy_cidrs,
             metrics_public: env::var("METRICS_PUBLIC")
                 .ok()
