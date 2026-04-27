@@ -256,6 +256,14 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::email_queue_stats),
         )
         .route(
+            "/api/v1/email/queue/dead-letter",
+            get(handlers::email_dead_letter_list),
+        )
+        .route(
+            "/api/v1/email/queue/dead-letter/:job_id/requeue",
+            post(handlers::email_dead_letter_requeue),
+        )
+        .route(
             "/api/v1/audit/logs",
             get(handlers::audit_logs),
         )

@@ -108,6 +108,11 @@ fn parse_admin_action(path: &str, method: &axum::http::Method) -> (String, Strin
         ("view_email_analytics".to_string(), "email_analytics".to_string(), None)
     } else if path.contains("/email/queue/stats") {
         ("view_queue_stats".to_string(), "email_queue".to_string(), None)
+    } else if path.contains("/email/queue/dead-letter") && path.contains("/requeue") {
+        let job_id = path.split('/').nth_back(1).map(|s| s.to_string());
+        ("requeue_dead_letter".to_string(), "email_queue".to_string(), job_id)
+    } else if path.contains("/email/queue/dead-letter") {
+        ("list_dead_letter".to_string(), "email_queue".to_string(), None)
     } else if path.contains("/audit/logs") {
         ("query_audit_logs".to_string(), "audit_log".to_string(), None)
     } else {
