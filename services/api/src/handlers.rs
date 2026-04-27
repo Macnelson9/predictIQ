@@ -819,30 +819,32 @@ pub async fn blockchain_user_bets(
     Path(user): Path<String>,
     Query(query): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let limit = query.limit();
-    let cursor = query.cursor();
-    let data = state
+    let page_size = query.limit();
+    // cursor encodes the page number (0-based)
+    let page = query
+        .cursor()
+        .as_deref()
+        .and_then(|c| c.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+
+    let page_data = state
         .blockchain
-        .user_bets_cached(&user, limit)
+        .user_bets_page(&user, page, page_size)
         .await
         .map_err(into_api_error)?;
 
-    let start_idx = cursor
-        .as_ref()
-        .and_then(|c| c.parse::<usize>().ok())
-        .unwrap_or(0);
-    let end_idx = (start_idx + limit as usize).min(data.len());
-    let has_more = end_idx < data.len();
+    let has_more = (page + 1) * page_size < page_data.total;
     let next_cursor = if has_more {
-        Some(end_idx.to_string())
+        Some((page + 1).to_string())
     } else {
         None
     };
 
     let paginated = PaginatedResponse::new(
-        data[start_idx..end_idx].to_vec(),
+        page_data.items,
         next_cursor,
-        limit,
+        page_size,
         has_more,
     );
 

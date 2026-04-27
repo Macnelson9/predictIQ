@@ -34,6 +34,26 @@ This service uses PostgreSQL. Schema and seed scripts are in:
 > order (`010_add_soft_delete_newsletter.sql` before `010_create_audit_log.sql`) or
 > rename one to `011_` to avoid ambiguity with migration runners that sort by filename.
 
+## Connection Pool Configuration
+
+Pool sizing and timeouts are fully env-configurable — no code changes needed for different deployment sizes.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_POOL_MIN_CONNECTIONS` | `5` | Minimum idle connections kept open |
+| `DB_POOL_MAX_CONNECTIONS` | `25` | Maximum concurrent connections |
+| `DB_POOL_ACQUIRE_TIMEOUT_SECS` | `5` | Seconds to wait for a free connection before error |
+| `DB_POOL_IDLE_TIMEOUT_SECS` | _(sqlx default)_ | Seconds before idle connections are reaped (0 = disabled) |
+| `DB_POOL_MAX_LIFETIME_SECS` | _(sqlx default)_ | Max lifetime of a connection in seconds (0 = disabled) |
+| `DB_QUERY_TIMEOUT_SECS` | `30` | Per-query execution timeout; queries exceeding this return an error |
+
+**Sizing guidance:**
+- Small / dev: `DB_POOL_MIN_CONNECTIONS=2 DB_POOL_MAX_CONNECTIONS=5`
+- Medium: `DB_POOL_MIN_CONNECTIONS=5 DB_POOL_MAX_CONNECTIONS=25` (default)
+- Large / high-traffic: `DB_POOL_MIN_CONNECTIONS=10 DB_POOL_MAX_CONNECTIONS=100`
+
+Pool metrics are exposed on the `/metrics` Prometheus endpoint under the `db_pool_*` family.
+
 ## Apply Migrations
 
 Run from the workspace root:
