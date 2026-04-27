@@ -1041,8 +1041,14 @@ pub async fn sendgrid_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(events): Json<Vec<crate::email::webhook::SendGridEvent>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    sendgrid_webhook_handler(State(Arc::new(state.webhook_handler.clone())), headers, Json(events)).await
+) -> Result<impl IntoResponse, ApiError> {
+    sendgrid_webhook_handler(State(Arc::new(state.webhook_handler.clone())), headers, Json(events))
+        .await
+        .map_err(|(status, msg)| ApiError {
+            code: "WEBHOOK_ERROR",
+            message: msg,
+            status,
+        })
 }
 
 /// Query audit logs with filters
