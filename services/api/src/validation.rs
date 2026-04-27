@@ -10,7 +10,17 @@ use serde::Serialize;
 
 use crate::security::sanitize;
 
-const DEFAULT_REQUEST_BODY_MAX_BYTES: usize = 1_048_576;
+/// Default request body size limit: 1 MiB.
+///
+/// Override at runtime with the `REQUEST_BODY_MAX_BYTES` environment variable.
+/// The value must be a positive integer (bytes).  Zero and non-numeric values
+/// fall back to this default.
+///
+/// ```text
+/// REQUEST_BODY_MAX_BYTES=524288   # 512 KiB
+/// REQUEST_BODY_MAX_BYTES=2097152  # 2 MiB
+/// ```
+pub const DEFAULT_REQUEST_BODY_MAX_BYTES: usize = 1_048_576; // 1 MiB
 const REQUEST_BODY_MAX_BYTES_ENV: &str = "REQUEST_BODY_MAX_BYTES";
 
 #[derive(Serialize)]
@@ -80,45 +90,60 @@ pub async fn request_validation_middleware(
     Ok(next.run(request).await)
 }
 
-/// Content-Type validation for POST/PUT requests
+/// Content-Type validation for POST/PUT/PATCH requests on JSON endpoints.
+///
+/// Accepts `application/json` with optional parameters (e.g. `charset=utf-8`).
+/// Any other content type — or a missing header — is rejected with **415 Unsupported
+/// Media Type** so that non-JSON bodies never reach JSON handlers.
+///
+/// This middleware must be placed *before* body-parsing extractors in the layer
+/// stack so that invalid requests are short-circuited early.
 pub async fn content_type_validation_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let method = request.method();
-    let headers = request.headers();
 
-    // Only validate POST, PUT, PATCH requests
+    // Only validate mutating methods; GET/HEAD/DELETE/OPTIONS pass through.
     if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
-        if let Some(content_type) = headers.get("content-type") {
-            let ct = content_type.to_str().unwrap_or("");
+        let ct = request
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
 
-            // Allow only JSON and form data
-            if !ct.starts_with("application/json")
-                && !ct.starts_with("application/x-www-form-urlencoded")
-                && !ct.starts_with("multipart/form-data")
-            {
-                return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
-            }
-        } else {
-            // Require Content-Type header for mutation requests
-            return Err(StatusCode::BAD_REQUEST);
+        // Accept "application/json" with any optional parameters such as
+        // "; charset=utf-8".  Everything else — including an absent header
+        // (ct == "") — is rejected with 415.
+        let mime_type = ct.split(';').next().unwrap_or("").trim();
+        if !mime_type.eq_ignore_ascii_case("application/json") {
+            return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         }
     }
 
     Ok(next.run(request).await)
 }
 
-/// Request size validation
+/// Request body size guard.
+///
+/// Enforces `REQUEST_BODY_MAX_BYTES` (default: 1 MiB) against the **actual
+/// body stream**, not just the `Content-Length` header.  This prevents both:
+///
+/// * Chunked-transfer requests that carry no `Content-Length` header.
+/// * Clients that send a small `Content-Length` but stream a larger body.
+///
+/// The `Content-Length` header is still checked first as a cheap fast-path so
+/// that obviously oversized requests are rejected before any bytes are read.
+///
+/// Returns **413 Payload Too Large** when the limit is exceeded.
 pub async fn request_size_validation_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let headers = request.headers();
     let max_bytes = request_body_max_bytes_from_env();
 
-    // Check Content-Length header
-    if let Some(content_length) = headers.get("content-length") {
+    // ── Fast-path: reject on Content-Length before touching the body ──────────
+    if let Some(content_length) = request.headers().get(axum::http::header::CONTENT_LENGTH) {
         if let Ok(length_str) = content_length.to_str() {
             if let Ok(length) = length_str.parse::<usize>() {
                 if length > max_bytes {
@@ -128,5 +153,18 @@ pub async fn request_size_validation_middleware(
         }
     }
 
+    // ── Stream guard: buffer up to max_bytes + 1 and reject on overflow ───────
+    //
+    // `axum::body::to_bytes` with a limit returns `LengthLimitError` when the
+    // body exceeds `max_bytes`, covering chunked-transfer and any body that
+    // omits or lies about `Content-Length`.  We then reconstruct the request
+    // with the buffered bytes so downstream handlers can read it normally.
+    let (parts, body) = request.into_parts();
+
+    let bytes = axum::body::to_bytes(body, max_bytes)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+
+    let request = Request::from_parts(parts, Body::from(bytes));
     Ok(next.run(request).await)
 }

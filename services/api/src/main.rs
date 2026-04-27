@@ -2,7 +2,7 @@ use predictiq_api::{
     audit::AuditLogger,
     blockchain::BlockchainClient,
     cache::RedisCache,
-    config::Config,
+    config::{Config, CorsConfig},
     db::Database,
     email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler},
     handlers,
@@ -18,6 +18,7 @@ use predictiq_api::{
 use std::{sync::Arc, time::Duration};
 
 use axum::{
+    http::{HeaderName, HeaderValue, Method},
     middleware,
     routing::{get, post},
     Router,
@@ -32,6 +33,51 @@ fn shutdown_timeout() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30);
     Duration::from_secs(secs)
+}
+
+/// Build a [`CorsLayer`] from the application's [`CorsConfig`].
+///
+/// When `dev_mode` is `true` the layer is fully permissive and a warning is
+/// emitted so the setting is never silent.  In all other cases only the
+/// explicitly configured origins, methods, and headers are allowed.
+fn build_cors_layer(cfg: &CorsConfig) -> CorsLayer {
+    if cfg.dev_mode {
+        tracing::warn!(
+            "CORS_DEV_MODE is enabled — all origins are permitted. \
+             This MUST NOT be used in production."
+        );
+        return CorsLayer::permissive();
+    }
+
+    let origins: Vec<HeaderValue> = cfg
+        .allowed_origins
+        .iter()
+        .filter_map(|o| o.parse::<HeaderValue>().ok())
+        .collect();
+
+    let methods: Vec<Method> = cfg
+        .allowed_methods
+        .iter()
+        .filter_map(|m| m.parse::<Method>().ok())
+        .collect();
+
+    let headers: Vec<HeaderName> = cfg
+        .allowed_headers
+        .iter()
+        .filter_map(|h| h.parse::<HeaderName>().ok())
+        .collect();
+
+    let layer = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(methods)
+        .allow_headers(headers)
+        .max_age(Duration::from_secs(cfg.max_age_secs));
+
+    if cfg.allow_credentials {
+        layer.allow_credentials(true)
+    } else {
+        layer
+    }
 }
 
 #[tokio::main]
@@ -126,24 +172,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── CORS ──────────────────────────────────────────────────────────────────
-    let allowed_origins = if state.config.api_keys.is_empty() {
-        CorsLayer::permissive()
-    } else {
-        CorsLayer::new()
-            .allow_origin(
-                state
-                    .config
-                    .base_url
-                    .parse::<axum::http::HeaderValue>()
-                    .unwrap_or(axum::http::HeaderValue::from_static("*")),
-            )
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
-    };
+    let cors_layer = build_cors_layer(&state.config.cors);
 
     // ── Routes ────────────────────────────────────────────────────────────────
     let public_routes = Router::new()
@@ -180,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(state.clone(), idempotency::idempotency_middleware))
         .layer(middleware::from_fn(validation::content_type_validation_middleware))
+        .layer(middleware::from_fn(validation::request_size_validation_middleware))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
             rate_limit::newsletter_rate_limit_middleware,
@@ -195,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(middleware::from_fn(correlation::correlation_id_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(security::security_headers_middleware))
+        .layer(middleware::from_fn(validation::request_size_validation_middleware))
         .with_state(state.clone());
 
     let admin_routes = Router::new()
@@ -242,6 +273,8 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             idempotency::idempotency_middleware,
         ))
+        .layer(middleware::from_fn(validation::content_type_validation_middleware))
+        .layer(middleware::from_fn(validation::request_size_validation_middleware))
         .layer(middleware::from_fn_with_state(
             (ip_whitelist.clone(), security::TrustProxy(config_trust_proxy)),
             security::ip_whitelist_middleware,
@@ -262,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(webhook_routes)
         .merge(admin_routes)
         .layer(compression::compression_layer())
-        .layer(allowed_origins);
+        .layer(cors_layer);
 
     // ── Server + graceful shutdown ────────────────────────────────────────────
     let listener = TcpListener::bind(bind_addr).await?;
