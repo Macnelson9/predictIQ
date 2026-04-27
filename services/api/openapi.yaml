@@ -25,7 +25,7 @@ info:
     announcement before being removed.
 
 servers:
-  - url: http://localhost:8080
+  - url: http://0.0.0.0:8080
     description: Local development (default bind 0.0.0.0:8080)
 
 tags:
@@ -467,6 +467,21 @@ paths:
       tags: [webhooks]
       operationId: sendgridWebhook
       summary: SendGrid event webhook receiver
+      security:
+        - SendGridWebhook: []
+      parameters:
+        - name: X-Twilio-Email-Event-Webhook-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 signature of timestamp+body, base64-encoded
+        - name: X-Twilio-Email-Event-Webhook-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Unix timestamp of the request (replay protection window is 300 s)
       requestBody:
         required: true
         content:
@@ -478,6 +493,8 @@ paths:
       responses:
         "200":
           description: Webhook processed
+        "401":
+          $ref: "#/components/responses/ApiError"
 
 components:
   parameters:
@@ -661,7 +678,7 @@ components:
 
   responses:
     ApiError:
-      description: Internal server error
+      description: Error response with machine-readable code
       content:
         application/json:
           schema:
@@ -679,3 +696,8 @@ components:
       in: header
       name: X-API-Key
       description: Admin API key required for protected endpoints
+    SendGridWebhook:
+      type: apiKey
+      in: header
+      name: X-Twilio-Email-Event-Webhook-Signature
+      description: HMAC-SHA256 signature provided by SendGrid on webhook delivery

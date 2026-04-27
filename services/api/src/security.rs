@@ -410,6 +410,9 @@ pub async fn metrics_auth_middleware(
 /// against the raw request body. When `SENDGRID_WEBHOOK_SECRET` is not configured
 /// the middleware passes through (permissive default for local dev).
 ///
+/// Replay protection: rejects requests whose `X-Twilio-Email-Event-Webhook-Timestamp`
+/// is more than 300 seconds old relative to the server clock.
+///
 /// # OpenAPI policy
 /// Route: `POST /webhooks/sendgrid`
 /// Auth: provider-signed (SendGrid HMAC) — no API key required.
@@ -425,12 +428,28 @@ pub async fn sendgrid_webhook_middleware(
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
 
+        // Replay protection: reject stale timestamps (> 300 s)
+        let ts_str = headers
+            .get("x-twilio-email-event-webhook-timestamp")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        let ts: i64 = ts_str.parse().unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if (now - ts).abs() > 300 {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
         let (parts, body) = request.into_parts();
         let bytes = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        if !signing::verify_signature(&bytes, sig, secret) {
+        // Signature covers timestamp + payload per SendGrid spec
+        let signed_payload = format!("{}{}", ts_str, String::from_utf8_lossy(&bytes));
+        if !signing::verify_signature(signed_payload.as_bytes(), sig, secret) {
             return Err(StatusCode::UNAUTHORIZED);
         }
 
