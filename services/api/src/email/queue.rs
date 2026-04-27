@@ -3,12 +3,14 @@ use redis::AsyncCommands;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::cache::RedisCache;
 use crate::db::Database;
 use crate::email::service::idempotency_key;
 use crate::email::types::{EmailJobStatus, EmailJobType};
+use crate::shutdown::ShutdownCoordinator;
 
 const EMAIL_QUEUE_KEY: &str = "email:queue";
 const EMAIL_PROCESSING_KEY: &str = "email:processing";
@@ -324,39 +326,70 @@ impl EmailQueue {
         Ok(count)
     }
 
-    /// Background worker to process email queue
-    pub async fn start_worker(&self, service: crate::email::EmailService) {
-        tracing::info!("Starting email queue worker");
+    /// Background worker to process email queue.
+    ///
+    /// Accepts a [`CancellationToken`] and a [`ShutdownCoordinator`].
+    /// On shutdown:
+    ///   - stops dequeuing new jobs immediately
+    ///   - allows any in-flight `process_job` call to complete
+    ///   - calls `coordinator.worker_completed()` before returning
+    pub async fn start_worker(
+        &self,
+        service: crate::email::EmailService,
+        shutdown: CancellationToken,
+        coordinator: ShutdownCoordinator,
+    ) {
+        tracing::info!("Email queue worker started");
 
-        // Recover any jobs stuck in processing from a previous crash
         if let Err(e) = self.recover_orphaned_jobs().await {
             tracing::warn!("Failed to recover orphaned jobs: {}", e);
         }
 
         loop {
-            // Process retries first
+            // Do not pick up new work after shutdown signal.
+            if shutdown.is_cancelled() {
+                tracing::info!("Email queue worker: shutdown signal received, draining stops");
+                break;
+            }
+
+            // Process retries first (quick Redis operation, safe to run).
             if let Err(e) = self.process_retries().await {
                 tracing::error!("Error processing retries: {}", e);
             }
 
-            // Process next job
             match self.dequeue().await {
                 Ok(Some(job_id)) => {
+                    // In-flight job always runs to completion.
                     if let Err(e) = self.process_job(job_id, &service).await {
                         tracing::error!("Error processing job {}: {}", job_id, e);
                         let _ = self.mark_failed(job_id, &e.to_string()).await;
                     }
                 }
                 Ok(None) => {
-                    // No jobs available, sleep briefly
-                    sleep(Duration::from_secs(1)).await;
+                    // Queue empty — wait briefly or exit early on shutdown.
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(1)) => {}
+                        _ = shutdown.cancelled() => {
+                            tracing::info!("Email queue worker: shutdown during idle sleep, stopping");
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Error dequeuing job: {}", e);
-                    sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(5)) => {}
+                        _ = shutdown.cancelled() => {
+                            tracing::info!("Email queue worker: shutdown during error backoff, stopping");
+                            break;
+                        }
+                    }
                 }
             }
         }
+
+        tracing::info!("Email queue worker stopped");
+        coordinator.worker_completed();
     }
 
     async fn process_job(&self, job_id: Uuid, service: &crate::email::EmailService) -> Result<()> {

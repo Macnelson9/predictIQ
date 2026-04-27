@@ -14,6 +14,7 @@ use crate::{
     cache::{keys, RedisCache},
     config::Config,
     metrics::Metrics,
+    shutdown::{ShutdownCoordinator, WorkerHandle},
 };
 
 #[derive(Clone)]
@@ -697,7 +698,16 @@ impl BlockchainClient {
         Ok(confirmed_tip)
     }
 
-    pub async fn run_sync_worker(self: Arc<Self>) {
+    /// Sync worker — polls for new on-chain events on each iteration.
+    /// Stops cleanly when `shutdown` is cancelled; any in-flight `sync_once`
+    /// call is always allowed to complete before the loop exits.
+    pub async fn run_sync_worker(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+        coordinator: ShutdownCoordinator,
+    ) {
+        tracing::info!("Blockchain sync worker started");
+
         let cursor_key = keys::chain_sync_cursor(&self.network);
         let mut cursor = self
             .cache
@@ -708,6 +718,13 @@ impl BlockchainClient {
             .unwrap_or(0);
 
         loop {
+            // Check for shutdown *before* picking up new work.
+            if shutdown.is_cancelled() {
+                tracing::info!("Blockchain sync worker: shutdown signal received, stopping");
+                break;
+            }
+
+            // Do the work — always runs to completion even if cancelled mid-way.
             match self.sync_once(cursor).await {
                 Ok(next_cursor) => {
                     cursor = next_cursor;
@@ -719,12 +736,35 @@ impl BlockchainClient {
                 Err(err) => tracing::warn!("sync loop error: {err}"),
             }
 
-            sleep(self.event_poll_interval).await;
+            // Wait for the poll interval OR an early shutdown signal.
+            tokio::select! {
+                _ = sleep(self.event_poll_interval) => {}
+                _ = shutdown.cancelled() => {
+                    tracing::info!("Blockchain sync worker: shutdown during sleep, stopping");
+                    break;
+                }
+            }
         }
+
+        tracing::info!("Blockchain sync worker stopped");
+        coordinator.worker_completed();
     }
 
-    pub async fn run_transaction_monitor(self: Arc<Self>) {
+    /// Transaction monitor — polls watched hashes on each iteration.
+    /// Same shutdown contract as `run_sync_worker`.
+    pub async fn run_transaction_monitor(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+        coordinator: ShutdownCoordinator,
+    ) {
+        tracing::info!("Blockchain transaction monitor started");
+
         loop {
+            if shutdown.is_cancelled() {
+                tracing::info!("Transaction monitor: shutdown signal received, stopping");
+                break;
+            }
+
             let hashes = self
                 .monitor
                 .watched_txs
@@ -742,8 +782,17 @@ impl BlockchainClient {
                 }
             }
 
-            sleep(self.tx_poll_interval).await;
+            tokio::select! {
+                _ = sleep(self.tx_poll_interval) => {}
+                _ = shutdown.cancelled() => {
+                    tracing::info!("Transaction monitor: shutdown during sleep, stopping");
+                    break;
+                }
+            }
         }
+
+        tracing::info!("Blockchain transaction monitor stopped");
+        coordinator.worker_completed();
     }
 
     pub async fn watch_transaction(&self, hash: &str) {
@@ -800,15 +849,27 @@ impl BlockchainClient {
         Ok(progress)
     }
 
-    pub fn start_background_tasks(self: Arc<Self>) {
+    /// Spawn both background workers and return their handles.
+    /// Each worker holds a child cancellation token and reports completion
+    /// to the coordinator when it exits.
+    pub fn start_background_tasks(self: Arc<Self>, coordinator: &ShutdownCoordinator) -> Vec<WorkerHandle> {
+        let sync_token = coordinator.token();
+        let sync_coord = coordinator.clone();
         let sync_client = self.clone();
-        tokio::spawn(async move {
-            sync_client.run_sync_worker().await;
+        let sync_handle = tokio::spawn(async move {
+            sync_client.run_sync_worker(sync_token, sync_coord).await;
         });
 
-        let monitor_client = self;
-        tokio::spawn(async move {
-            monitor_client.run_transaction_monitor().await;
+        let mon_token = coordinator.token();
+        let mon_coord = coordinator.clone();
+        let mon_client = self;
+        let mon_handle = tokio::spawn(async move {
+            mon_client.run_transaction_monitor(mon_token, mon_coord).await;
         });
+
+        vec![
+            WorkerHandle::new("blockchain-sync", sync_handle),
+            WorkerHandle::new("blockchain-tx-monitor", mon_handle),
+        ]
     }
 }
