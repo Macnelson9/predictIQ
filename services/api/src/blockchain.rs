@@ -12,7 +12,7 @@ use tokio::{sync::RwLock, time::sleep};
 
 use crate::{
     cache::{keys, RedisCache},
-    config::Config,
+    config::{Config, ContractKeySchema},
     metrics::Metrics,
     shutdown::{ShutdownCoordinator, WorkerHandle},
 };
@@ -23,6 +23,7 @@ pub struct BlockchainClient {
     rpc_url: String,
     network: String,
     contract_id: String,
+    key_schema: ContractKeySchema,
     retry_attempts: u32,
     retry_base_delay_ms: u64,
     event_poll_interval: Duration,
@@ -155,11 +156,35 @@ impl BlockchainClient {
             .build()
             .context("failed to construct RPC http client")?;
 
+        // ── Startup schema validation ─────────────────────────────────────────
+        // Validate the key schema eagerly so template drift is caught before
+        // any contract reads are attempted.  A validation failure is logged as
+        // an error but does not abort startup — the operator can correct the
+        // env vars and redeploy without a full restart cycle.
+        let key_schema = config.contract_key_schema.clone();
+        match key_schema.validate() {
+            Ok(()) => tracing::info!(
+                schema_version = %key_schema.version,
+                market = %key_schema.market,
+                platform_stats = %key_schema.platform_stats,
+                user_bets = %key_schema.user_bets,
+                oracle_result = %key_schema.oracle_result,
+                health_check = %key_schema.health_check,
+                "Contract key schema loaded and validated"
+            ),
+            Err(e) => tracing::error!(
+                schema_version = %key_schema.version,
+                error = %e,
+                "Contract key schema validation FAILED — contract reads may use wrong keys"
+            ),
+        }
+
         Ok(Self {
             http,
             rpc_url: config.blockchain_rpc_url.clone(),
             network: config.network_name().to_string(),
             contract_id: config.contract_id.clone(),
+            key_schema,
             retry_attempts: config.retry_attempts.max(1),
             retry_base_delay_ms: config.retry_base_delay_ms.max(50),
             event_poll_interval: config.event_poll_interval,
@@ -257,7 +282,7 @@ impl BlockchainClient {
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
-                            "key": format!("market:{}", market_id),
+                            "key": self.key_schema.market_key(market_id),
                         }),
                     )
                     .await
@@ -317,7 +342,7 @@ impl BlockchainClient {
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
-                            "key": "platform:stats",
+                            "key": self.key_schema.platform_stats.clone(),
                         }),
                     )
                     .await
@@ -385,7 +410,7 @@ impl BlockchainClient {
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
-                            "key": format!("user_bets:{}", user),
+                            "key": self.key_schema.user_bets_key(user),
                             "limit": page_size,
                             "offset": offset,
                         }),
@@ -463,7 +488,7 @@ impl BlockchainClient {
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
-                            "key": format!("oracle_result:{}", market_id),
+                            "key": self.key_schema.oracle_result_key(market_id),
                         }),
                     )
                     .await
@@ -552,7 +577,7 @@ impl BlockchainClient {
                         "getContractData",
                         json!({
                             "contractId": self.contract_id,
-                            "key": "platform:stats",
+                            "key": self.key_schema.health_check.clone(),
                         }),
                     )
                     .await

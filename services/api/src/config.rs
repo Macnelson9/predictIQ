@@ -6,6 +6,107 @@ use std::{
 };
 use ipnet::IpNet;
 
+// ── CORS configuration ────────────────────────────────────────────────────────
+
+/// CORS policy loaded from environment variables.
+///
+/// | Variable              | Default (production-safe)                          |
+/// |-----------------------|----------------------------------------------------|
+/// | `CORS_DEV_MODE`       | `false` — set `true` only in local dev             |
+/// | `CORS_ALLOWED_ORIGINS`| *(empty)* — must be set explicitly in production   |
+/// | `CORS_ALLOWED_METHODS`| `GET,POST,PUT,PATCH,DELETE,OPTIONS`                |
+/// | `CORS_ALLOWED_HEADERS`| `content-type,authorization`                       |
+/// | `CORS_ALLOW_CREDENTIALS` | `false`                                         |
+/// | `CORS_MAX_AGE_SECS`   | `3600`                                             |
+///
+/// When `CORS_DEV_MODE=true` the layer becomes fully permissive and all other
+/// settings are ignored.  This is logged at startup so it is never silent.
+///
+/// When `CORS_DEV_MODE` is `false` (the default) and `CORS_ALLOWED_ORIGINS` is
+/// empty, **no** `Access-Control-Allow-Origin` header is emitted — cross-origin
+/// requests will be blocked by browsers.  Set the variable to a
+/// comma-separated list of exact origins, e.g.
+/// `CORS_ALLOWED_ORIGINS=https://app.predictiq.com,https://staging.predictiq.com`.
+#[derive(Clone, Debug)]
+pub struct CorsConfig {
+    /// When `true` the CORS layer is fully permissive (wildcard origin, all
+    /// methods/headers).  Must never be `true` in production.
+    pub dev_mode: bool,
+    /// Exact origins that are allowed.  Empty means no cross-origin access.
+    pub allowed_origins: Vec<String>,
+    /// HTTP methods to expose via CORS.
+    pub allowed_methods: Vec<String>,
+    /// Request headers to expose via CORS.
+    pub allowed_headers: Vec<String>,
+    /// Whether to allow cookies / credentials.
+    pub allow_credentials: bool,
+    /// Preflight cache lifetime in seconds (`Access-Control-Max-Age`).
+    pub max_age_secs: u64,
+}
+
+impl CorsConfig {
+    pub fn from_env() -> Self {
+        let dev_mode = env::var("CORS_DEV_MODE")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let allowed_methods = env::var("CORS_ALLOWED_METHODS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_uppercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+
+        let allowed_headers = env::var("CORS_ALLOWED_HEADERS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                ["content-type", "authorization"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+
+        let allow_credentials = env::var("CORS_ALLOW_CREDENTIALS")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let max_age_secs = env::var("CORS_MAX_AGE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600u64);
+
+        Self {
+            dev_mode,
+            allowed_origins,
+            allowed_methods,
+            allowed_headers,
+            allow_credentials,
+            max_age_secs,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum BlockchainNetwork {
     Testnet,
@@ -68,6 +169,8 @@ pub struct Config {
     pub trust_proxy: bool,
     pub request_signing_secret: Option<String>,
     pub sendgrid_webhook_secret: Option<String>,
+    /// Webhook replay protection window in seconds. Default: 300 (5 minutes).
+    pub webhook_replay_window_secs: u64,
     pub trusted_proxy_cidrs: Vec<IpNet>,
     /// When `true` the `/metrics` endpoint is publicly accessible (no auth).
     /// Defaults to `false`. Set `METRICS_PUBLIC=true` only in trusted environments.
@@ -92,6 +195,11 @@ pub struct Config {
     pub gdpr_export_rate_window_secs: u64,
     /// HMAC secret for signing unsubscribe tokens.
     pub unsubscribe_signing_secret: Option<String>,
+    /// CORS policy.  See [`CorsConfig`] for per-field documentation.
+    pub cors: CorsConfig,
+    /// Contract storage key schema.  See [`ContractKeySchema`] for per-field
+    /// documentation and startup validation.
+    pub contract_key_schema: ContractKeySchema,
 }
 
 impl Config {
@@ -238,6 +346,10 @@ impl Config {
                 .unwrap_or(true),
             request_signing_secret: env::var("REQUEST_SIGNING_SECRET").ok(),
             sendgrid_webhook_secret: env::var("SENDGRID_WEBHOOK_SECRET").ok(),
+            webhook_replay_window_secs: env::var("WEBHOOK_REPLAY_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300),
             trusted_proxy_cidrs,
             metrics_public: env::var("METRICS_PUBLIC")
                 .ok()
@@ -273,6 +385,8 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3600),
             unsubscribe_signing_secret: env::var("UNSUBSCRIBE_SIGNING_SECRET").ok(),
+            cors: CorsConfig::from_env(),
+            contract_key_schema: ContractKeySchema::from_env(),
         }
     }
 
@@ -285,7 +399,7 @@ impl Config {
     }
 }
 
-/// Versioned contract key schema.
+/// Versioned contract storage key schema.
 ///
 /// Each field is a key template where `{id}` is replaced at call time.
 /// Defaults match the v1 deployed schema; override via env vars for per-network
@@ -293,9 +407,21 @@ impl Config {
 ///
 /// Schema version is bumped whenever a key template changes, so callers can
 /// detect mismatches at startup.
-#[derive(Clone, Debug)]
+///
+/// | Variable                    | Default              | `{id}` required |
+/// |-----------------------------|----------------------|-----------------|
+/// | `CONTRACT_KEY_VERSION`      | `"1.0.0"`            | —               |
+/// | `CONTRACT_KEY_MARKET`       | `"market:{id}"`      | ✓               |
+/// | `CONTRACT_KEY_PLATFORM_STATS` | `"platform:stats"` | —               |
+/// | `CONTRACT_KEY_USER_BETS`    | `"user_bets:{id}"`   | ✓               |
+/// | `CONTRACT_KEY_ORACLE_RESULT`| `"oracle_result:{id}"` | ✓             |
+/// | `CONTRACT_KEY_HEALTH_CHECK` | `"platform:stats"`   | —               |
+///
+/// Call [`ContractKeySchema::validate`] at startup to detect template drift
+/// before any contract reads are attempted.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContractKeySchema {
-    /// Semver string, e.g. "1.0.0".
+    /// Semver string, e.g. "1.0.0".  Bump when any template changes.
     pub version: String,
     /// Key for a single market, `{id}` → market_id.
     pub market: String,
@@ -305,40 +431,112 @@ pub struct ContractKeySchema {
     pub user_bets: String,
     /// Key for an oracle result, `{id}` → market_id.
     pub oracle_result: String,
+    /// Key used by the health-check probe to verify contract reachability.
+    /// Defaults to `platform_stats` so no extra storage slot is needed.
+    pub health_check: String,
 }
+
+/// Error returned by [`ContractKeySchema::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaValidationError {
+    /// Human-readable description of every problem found.
+    pub errors: Vec<String>,
+}
+
+impl std::fmt::Display for SchemaValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "contract key schema validation failed: {}", self.errors.join("; "))
+    }
+}
+
+impl std::error::Error for SchemaValidationError {}
 
 impl ContractKeySchema {
     /// Load from environment, falling back to v1 defaults.
     ///
     /// Override env vars:
     /// - `CONTRACT_KEY_VERSION`
-    /// - `CONTRACT_KEY_MARKET`          (default: `"market:{id}"`)
-    /// - `CONTRACT_KEY_PLATFORM_STATS`  (default: `"platform:stats"`)
-    /// - `CONTRACT_KEY_USER_BETS`       (default: `"user_bets:{id}"`)
-    /// - `CONTRACT_KEY_ORACLE_RESULT`   (default: `"oracle_result:{id}"`)
+    /// - `CONTRACT_KEY_MARKET`            (default: `"market:{id}"`)
+    /// - `CONTRACT_KEY_PLATFORM_STATS`    (default: `"platform:stats"`)
+    /// - `CONTRACT_KEY_USER_BETS`         (default: `"user_bets:{id}"`)
+    /// - `CONTRACT_KEY_ORACLE_RESULT`     (default: `"oracle_result:{id}"`)
+    /// - `CONTRACT_KEY_HEALTH_CHECK`      (default: same as `CONTRACT_KEY_PLATFORM_STATS`)
     pub fn from_env() -> Self {
+        let platform_stats = env::var("CONTRACT_KEY_PLATFORM_STATS")
+            .unwrap_or_else(|_| "platform:stats".to_string());
+
+        let health_check = env::var("CONTRACT_KEY_HEALTH_CHECK")
+            .unwrap_or_else(|_| platform_stats.clone());
+
         Self {
             version: env::var("CONTRACT_KEY_VERSION")
                 .unwrap_or_else(|_| "1.0.0".to_string()),
             market: env::var("CONTRACT_KEY_MARKET")
                 .unwrap_or_else(|_| "market:{id}".to_string()),
-            platform_stats: env::var("CONTRACT_KEY_PLATFORM_STATS")
-                .unwrap_or_else(|_| "platform:stats".to_string()),
+            platform_stats,
             user_bets: env::var("CONTRACT_KEY_USER_BETS")
                 .unwrap_or_else(|_| "user_bets:{id}".to_string()),
             oracle_result: env::var("CONTRACT_KEY_ORACLE_RESULT")
                 .unwrap_or_else(|_| "oracle_result:{id}".to_string()),
+            health_check,
         }
     }
 
+    /// Validate that all templates that require `{id}` actually contain it,
+    /// and that no template is empty.
+    ///
+    /// Returns `Err` with a list of every problem found so all issues are
+    /// surfaced in a single startup log line rather than discovered one by one.
+    pub fn validate(&self) -> Result<(), SchemaValidationError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // Templates that must contain the `{id}` placeholder.
+        let id_required = [
+            ("market", &self.market),
+            ("user_bets", &self.user_bets),
+            ("oracle_result", &self.oracle_result),
+        ];
+        for (name, template) in &id_required {
+            if template.is_empty() {
+                errors.push(format!("{name}: template must not be empty"));
+            } else if !template.contains("{id}") {
+                errors.push(format!(
+                    "{name}: template \"{template}\" is missing the {{id}} placeholder"
+                ));
+            }
+        }
+
+        // Templates that must be non-empty but don't need `{id}`.
+        let non_empty = [
+            ("platform_stats", &self.platform_stats),
+            ("health_check", &self.health_check),
+        ];
+        for (name, template) in &non_empty {
+            if template.is_empty() {
+                errors.push(format!("{name}: template must not be empty"));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(SchemaValidationError { errors })
+        }
+    }
+
+    // ── Key builders ──────────────────────────────────────────────────────────
+
+    /// Resolve the market key for `market_id`.
     pub fn market_key(&self, market_id: i64) -> String {
         self.market.replace("{id}", &market_id.to_string())
     }
 
+    /// Resolve the user-bets key for `user`.
     pub fn user_bets_key(&self, user: &str) -> String {
         self.user_bets.replace("{id}", user)
     }
 
+    /// Resolve the oracle-result key for `market_id`.
     pub fn oracle_result_key(&self, market_id: i64) -> String {
         self.oracle_result.replace("{id}", &market_id.to_string())
     }
