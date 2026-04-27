@@ -361,13 +361,17 @@ impl BlockchainClient {
         Ok(value)
     }
 
-    pub async fn user_bets_cached(
+    pub async fn user_bets_page(
         &self,
         user: &str,
-        limit: i64,
-    ) -> anyhow::Result<Vec<UserBet>> {
-        let limit = limit.clamp(1, 100);
-        let key = keys::chain_user_bets(&self.network, user, limit);
+        page: i64,
+        page_size: i64,
+    ) -> anyhow::Result<UserBetsPage> {
+        let page = page.max(0);
+        let page_size = page_size.clamp(1, 100);
+        let offset = page * page_size;
+
+        let key = keys::chain_user_bets_page(&self.network, user, page, page_size);
         let ttl = Duration::from_secs(30);
         let endpoint = "user_bets";
 
@@ -381,17 +385,25 @@ impl BlockchainClient {
                         json!({
                             "contractId": self.contract_id,
                             "key": format!("user_bets:{}", user),
-                            "limit": limit,
+                            "limit": page_size,
+                            "offset": offset,
                         }),
                     )
                     .await
-                    .unwrap_or_else(|_| json!({"bets": []}));
+                    .unwrap_or_else(|_| json!({"bets": [], "total": 0}));
 
                 let bets = data
                     .get("bets")
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+
+                // The RPC may return a total count; fall back to the slice length
+                // so we never over-report.
+                let total = data
+                    .get("total")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(bets.len() as i64);
 
                 let items = bets
                     .into_iter()
@@ -417,7 +429,13 @@ impl BlockchainClient {
                     })
                     .collect::<Vec<_>>();
 
-                Ok(items)
+                Ok(UserBetsPage {
+                    user: user.to_string(),
+                    page,
+                    page_size,
+                    total,
+                    items,
+                })
             })
             .await?;
 
@@ -544,20 +562,24 @@ impl BlockchainClient {
                     .unwrap_or_default()
                     .as_secs();
 
+                let status = if latest > 0 && contract_reachable {
+                    HealthStatus::Healthy
+                } else if latest > 0 {
+                    // Node is reachable but contract read failed — degraded, not healthy.
+                    HealthStatus::Degraded
+                } else {
+                    HealthStatus::Unhealthy
+                };
+
                 Ok(BlockchainHealth {
                     network: self.network.clone(),
                     rpc_url: self.rpc_url.clone(),
                     latest_ledger: latest,
-                    is_healthy: latest > 0 && contract_reachable,
+                    // is_healthy is true only when both node AND contract are reachable.
+                    is_healthy: status == HealthStatus::Healthy,
                     contract_reachable,
                     checked_at_unix,
-                    status: if latest > 0 && contract_reachable {
-                        HealthStatus::Healthy
-                    } else if latest > 0 {
-                        HealthStatus::Degraded
-                    } else {
-                        HealthStatus::Unhealthy
-                    },
+                    status,
                 })
             })
             .await?;

@@ -575,6 +575,14 @@ pub mod keys {
     }
     pub fn chain_user_bets_category() -> KeyCategory { KeyCategory::ChainUserBets }
 
+    /// Page-based key for bounded upstream queries (page + page_size).
+    pub fn chain_user_bets_page(network: &str, user: &str, page: i64, page_size: i64) -> String {
+        format!(
+            "{CHAIN_PREFIX}:user_bets:{network}:{}:page:{page}:size:{page_size}",
+            user.to_lowercase()
+        )
+    }
+
     pub fn chain_oracle_result(network: &str, market_id: i64) -> String {
         format!("{CHAIN_PREFIX}:oracle:{network}:market:{market_id}")
     }

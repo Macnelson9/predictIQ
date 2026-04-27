@@ -102,25 +102,21 @@ impl Database {
         database_url: &str,
         cache: RedisCache,
         metrics: Metrics,
-        query_timeout: Duration,
+        pool_config: &crate::config::DbPoolConfig,
     ) -> anyhow::Result<Self> {
-        let max_connections = std::env::var("DB_POOL_MAX")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(25u32);
-        let min_connections = std::env::var("DB_POOL_MIN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5u32);
-        let acquire_timeout_secs = std::env::var("DB_ACQUIRE_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5u64);
+        let mut builder = PgPoolOptions::new()
+            .max_connections(pool_config.max_connections)
+            .min_connections(pool_config.min_connections)
+            .acquire_timeout(pool_config.acquire_timeout);
 
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
-            .min_connections(min_connections)
-            .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
+        if let Some(idle) = pool_config.idle_timeout {
+            builder = builder.idle_timeout(idle);
+        }
+        if let Some(lifetime) = pool_config.max_lifetime {
+            builder = builder.max_lifetime(lifetime);
+        }
+
+        let pool = builder
             .connect(database_url)
             .await
             .context("failed to connect to postgres")?;
@@ -129,7 +125,7 @@ impl Database {
             pool,
             cache,
             metrics,
-            query_timeout,
+            query_timeout: pool_config.query_timeout,
         })
     }
 

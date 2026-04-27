@@ -1,60 +1,31 @@
-mod audit;
-mod audit_middleware;
-mod blockchain;
-mod cache;
-mod compression;
-mod config;
-mod correlation;
-mod db;
-mod email;
-mod handlers;
-mod idempotency;
-mod metrics;
-mod migrations;
-mod newsletter;
-mod pagination;
-mod rate_limit;
-mod security;
-mod tracing_config;
-mod validation;
-mod versioning;
+use predictiq_api::{
+    audit::AuditLogger,
+    blockchain::BlockchainClient,
+    cache::RedisCache,
+    config::Config,
+    db::Database,
+    email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler},
+    handlers,
+    idempotency, correlation, versioning, validation, rate_limit, audit_middleware,
+    metrics::Metrics,
+    newsletter::IpRateLimiter,
+    security::{self, ApiKeyAuth, IpWhitelist, RateLimiter},
+    tracing_config, compression,
+    AppState,
+};
 
 use std::sync::Arc;
 
-use audit::AuditLogger;
 use axum::{
     middleware,
     routing::{get, post},
     Router,
 };
-use blockchain::BlockchainClient;
-use cache::RedisCache;
-use config::Config;
-use db::Database;
-use email::{queue::EmailQueue, service::EmailService, webhook::WebhookHandler};
-use metrics::Metrics;
-use newsletter::IpRateLimiter;
-use security::{ApiKeyAuth, IpWhitelist, RateLimiter};
 use tokio::net::TcpListener;
 use tower_http::{
     cors::CorsLayer,
     trace::TraceLayer,
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-#[derive(Clone)]
-pub struct AppState {
-    pub(crate) config: Config,
-    pub(crate) cache: RedisCache,
-    pub(crate) db: Database,
-    pub(crate) blockchain: BlockchainClient,
-    pub(crate) metrics: Metrics,
-    pub(crate) newsletter_rate_limiter: IpRateLimiter,
-    pub(crate) email_service: EmailService,
-    pub(crate) email_queue: EmailQueue,
-    pub(crate) webhook_handler: WebhookHandler,
-    pub(crate) audit_logger: AuditLogger,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -70,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics = Metrics::new()?;
     let cache = RedisCache::new(&config.redis_url).await?;
-    let db = Database::new(&config.database_url, cache.clone(), metrics.clone(), config.db_pool.query_timeout).await?;
+    let db = Database::new(&config.database_url, cache.clone(), metrics.clone(), &config.db_pool).await?;
     let blockchain = BlockchainClient::new(&config, cache.clone(), metrics.clone())?;
     
     // Initialize email service components
@@ -100,19 +71,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Cleanup expired pending newsletter subscriptions hourly
-    let db_cleanup = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-        loop {
-            interval.tick().await;
-            let ttl = db_cleanup.config.newsletter_token_ttl_secs;
-            match db_cleanup.db.newsletter_delete_expired_pending(ttl).await {
-                Ok(n) if n > 0 => tracing::info!("[newsletter] cleaned up {n} expired pending subscriptions"),
-                Err(e) => tracing::warn!("[newsletter] cleanup error: {e}"),
-                _ => {}
-            }
-        }
-    });
+    // (spawned after `state` is constructed below)
 
     let state = Arc::new(AppState {
         config,
@@ -130,6 +89,21 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     Arc::new(state.blockchain.clone()).start_background_tasks();
+
+    // Cleanup expired pending newsletter subscriptions hourly
+    let db_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            let ttl = db_cleanup.config.newsletter_token_ttl_secs;
+            match db_cleanup.db.newsletter_delete_expired_pending(ttl).await {
+                Ok(n) if n > 0 => tracing::info!("[newsletter] cleaned up {n} expired pending subscriptions"),
+                Err(e) => tracing::warn!("[newsletter] cleanup error: {e}"),
+                _ => {}
+            }
+        }
+    });
 
     // Start email queue worker in background with shutdown awareness
     let queue_worker = email_queue.clone();
