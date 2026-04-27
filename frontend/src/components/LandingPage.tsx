@@ -1,6 +1,7 @@
 import React from 'react';
 import { useI18n } from '../lib/hooks/useI18n';
 import { useDarkMode } from '../lib/hooks/useDarkMode';
+import { Statistics } from './Statistics';
 
 interface LandingPageProps {
   className?: string;
@@ -172,6 +173,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ className }) => {
             />
           </form>
         </section>
+
+        {/* Statistics Section */}
+        <Statistics />
 
         {/* Features Section */}
         <section aria-labelledby="features-heading" id="features">
