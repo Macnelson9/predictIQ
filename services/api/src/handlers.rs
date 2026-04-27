@@ -1008,6 +1008,35 @@ pub async fn email_queue_stats(
     Ok((StatusCode::OK, Json(stats)))
 }
 
+pub async fn email_dead_letter_list(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let ids = state
+        .email_queue
+        .list_dead_letter()
+        .await
+        .map_err(into_api_error)?;
+
+    Ok((StatusCode::OK, Json(serde_json::json!({ "jobs": ids, "count": ids.len() }))))
+}
+
+pub async fn email_dead_letter_requeue(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let requeued = state
+        .email_queue
+        .requeue_dead_letter(job_id)
+        .await
+        .map_err(into_api_error)?;
+
+    if requeued {
+        Ok((StatusCode::OK, Json(serde_json::json!({ "requeued": true, "job_id": job_id }))))
+    } else {
+        Err(ApiError::not_found(format!("Job {job_id} not found in dead-letter set")))
+    }
+}
+
 pub async fn sendgrid_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
