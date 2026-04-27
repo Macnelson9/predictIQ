@@ -41,8 +41,9 @@ struct RateLimitEntry {
 
 /// Multi-tier rate limiter
 #[derive(Clone)]
-pub struct RateLimiter {
-    limits: Arc<RwLock<HashMap<String, RateLimitEntry>>>,
+pub struct WebhookConfig {
+    pub secret: Option<String>,
+    pub replay_window_secs: u64,
 }
 
 impl RateLimiter {
@@ -407,28 +408,37 @@ pub async fn metrics_auth_middleware(
 /// SendGrid webhook signature verification middleware.
 ///
 /// Verifies the `X-Twilio-Email-Event-Webhook-Signature` header using HMAC-SHA256
-/// against the raw request body. When `SENDGRID_WEBHOOK_SECRET` is not configured
-/// the middleware passes through (permissive default for local dev).
+/// against the raw request body. The `SENDGRID_WEBHOOK_SECRET` must be configured
+/// for webhook security, except in development environment where it passes through.
 ///
 /// Replay protection: rejects requests whose `X-Twilio-Email-Event-Webhook-Timestamp`
-/// is more than 300 seconds old relative to the server clock.
+/// is more than `WEBHOOK_REPLAY_WINDOW_SECS` seconds old relative to the server clock
+/// (default: 300 seconds).
 ///
 /// # OpenAPI policy
 /// Route: `POST /webhooks/sendgrid`
 /// Auth: provider-signed (SendGrid HMAC) — no API key required.
 pub async fn sendgrid_webhook_middleware(
-    State(secret): State<Option<String>>,
+    State(config): State<WebhookConfig>,
     headers: HeaderMap,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if let Some(ref secret) = secret {
+    let is_dev = std::env::var("ENVIRONMENT")
+        .map(|e| e == "development")
+        .unwrap_or(true); // default to dev if not set
+
+    if config.secret.is_none() && !is_dev {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    if let Some(ref secret) = config.secret {
         let sig = headers
             .get("x-twilio-email-event-webhook-signature")
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
 
-        // Replay protection: reject stale timestamps (> 300 s)
+        // Replay protection: reject stale timestamps (> config.replay_window_secs)
         let ts_str = headers
             .get("x-twilio-email-event-webhook-timestamp")
             .and_then(|h| h.to_str().ok())
@@ -438,7 +448,7 @@ pub async fn sendgrid_webhook_middleware(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if (now - ts).abs() > 300 {
+        if (now - ts).abs() > config.replay_window_secs as i64 {
             return Err(StatusCode::UNAUTHORIZED);
         }
 
